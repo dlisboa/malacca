@@ -1,4 +1,6 @@
 {
+  open Lexing
+
   exception SyntaxError of string
 
   type token =
@@ -77,6 +79,10 @@ let lex_identifier lexeme =
     | Some tok -> tok
     | None -> ID lexeme
 
+let skip_line lexbuf =
+  let pos = lexbuf.lex_curr_p in
+  lexbuf.lex_curr_p <-
+    { pos with pos_bol = lexbuf.lex_curr_pos; pos_lnum = pos.pos_lnum + 1 }
 }
 
 let digit = ['0'-'9']
@@ -86,13 +92,13 @@ let identifier = identifier_non_digit identifier_digit*
 let string = '"' (_* as contents) '"'
 let char = '\'' (_ as contents) '\''
 
-let ws = ' ' | '\t'
-let nl = '\n' | '\r' | "\r\n"
+let whitespace = [' ' '\t']+
+let newline = '\n' | '\r' | "\r\n"
 
 rule next_token = parse
   | eof { EOF }
-  | ws+ { next_token lexbuf } (* whitespace *)
-  | nl { next_token lexbuf } (* new line; TODO: count lines *)
+  | whitespace { next_token lexbuf }
+  | newline { skip_line lexbuf; next_token lexbuf }
 
   (* comments *)
   (* TODO *)
