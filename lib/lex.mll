@@ -89,8 +89,6 @@ let digit = ['0'-'9']
 let identifier_non_digit = ['a'-'z' 'A'-'Z' '_']
 let identifier_digit = ['0'-'9' 'a'-'z' 'A'-'Z' '_']
 let identifier = identifier_non_digit identifier_digit*
-let string = '"' (_* as contents) '"'
-let char = '\'' (_ as contents) '\''
 
 let whitespace = [' ' '\t']+
 let newline = '\n' | '\r' | "\r\n"
@@ -111,8 +109,8 @@ rule next_token = parse
   | digit+? '.' digit* as lexeme { FLOAT (float_of_string lexeme) }
 
   (* string/char *)
-  | string { STRING contents }
-  | char { CHAR contents }
+  | '\'' { lex_char lexbuf }
+  | '"' { lex_string (Buffer.create 64) lexbuf }
 
   (* preprocessor *)
   | '#' identifier [^ '\n']+ as lexeme { PREPROC lexeme }
@@ -165,6 +163,20 @@ rule next_token = parse
 
   (* rest *)
   | _ as char { raise (SyntaxError ("illegal character: '" ^ (Char.escaped char) ^ "'")) }
+
+and lex_char = parse
+  | _ as c '\'' { CHAR c }
+  | _ { raise (SyntaxError "illegal char constant")}
+
+and lex_string buf = parse
+  | '"' { STRING (Buffer.contents buf) }
+  | '\\' 'n' as text { Buffer.add_string buf text; lex_string buf lexbuf }
+  | '\\' 'r' as text { Buffer.add_string buf text; lex_string buf lexbuf }
+  | '\\' 't' as text { Buffer.add_string buf text; lex_string buf lexbuf }
+  | '\\' '\\' as text { Buffer.add_string buf text; lex_string buf lexbuf }
+  | [^ '\\' '"']+ as text { Buffer.add_string buf text; lex_string buf lexbuf }
+  | eof { raise (SyntaxError "unterminated string") }
+  | _ as c { raise (SyntaxError ("illegal string character: " ^ Char.escaped c)) }
 
 and lex_line_comment = parse
   | eof { EOF }
