@@ -1,2 +1,5 @@
 (library
- (name malacca))
+ (name malacca)
+ (preprocess (pps ppx_deriving.show)))
+
+(ocamllex lex)

@@ -1,10 +1,8 @@
 {
-  open Lexing
-
-  exception Eof
   exception SyntaxError of string
 
   type token =
+    | EOF
     | ID of string
     | INT of int
     | FLOAT of float
@@ -92,7 +90,7 @@ let ws = ' ' | '\t'
 let nl = '\n' | '\r' | "\r\n"
 
 rule next_token = parse
-  | eof { raise Eof }
+  | eof { EOF }
   | ws+ { next_token lexbuf } (* whitespace *)
   | nl { next_token lexbuf } (* new line; TODO: count lines *)
 
