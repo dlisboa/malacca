@@ -100,8 +100,8 @@ rule next_token = parse
   | whitespace { next_token lexbuf }
   | newline { skip_line lexbuf; next_token lexbuf }
 
-  (* comments *)
-  (* TODO *)
+  | "//" { lex_line_comment lexbuf }
+  | "/*" { lex_block_comment lexbuf }
 
   (* identifiers *)
   | identifier as lexeme { lex_identifier lexeme }
@@ -165,3 +165,15 @@ rule next_token = parse
 
   (* rest *)
   | _ as char { raise (SyntaxError ("illegal character: '" ^ (Char.escaped char) ^ "'")) }
+
+and lex_line_comment = parse
+  | eof { EOF }
+  | newline { skip_line lexbuf; next_token lexbuf }
+  | _ { lex_line_comment lexbuf }
+
+and lex_block_comment = parse
+  | "*/" { next_token lexbuf }
+  | eof { raise (SyntaxError "unterminated block comment") }
+  | newline { skip_line lexbuf; lex_block_comment lexbuf }
+  | _ { lex_block_comment lexbuf }
+
