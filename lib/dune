@@ -1,7 +1,6 @@
 (library
  (name malacca)
- (preprocess (pps ppx_deriving.show))
- (modules parse lex))
+ (preprocess (pps ppx_deriving.show)))
 
 (ocamlyacc parse)
 (ocamllex lex)
