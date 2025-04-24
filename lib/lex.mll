@@ -25,10 +25,16 @@ rule next_token = parse
   | digit+ '.' digit* as text { FLOAT (float_of_string text) }
   | '.' digit+ as text { FLOAT (float_of_string text) }
 
+  (* strings/char *)
   | "'" { lex_char lexbuf }
   | "\"" { lex_string (Buffer.create 64) lexbuf }
 
+  (* punctuators *)
   | ";" { SEMICOLON }
+  | "+" { PLUS }
+  | "-" { MINUS }
+  | "*" { STAR }
+  | "/" { SLASH }
 
 and lex_char = parse
   | _ as c "'" { CHAR c }
