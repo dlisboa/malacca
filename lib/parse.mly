@@ -8,17 +8,32 @@
 %token <char> CHAR
 %token <string> STRING
 
+%token <string> IDENTIFIER
+
 %token EOF
 %token PLUS MINUS STAR SLASH
-%token LBRACE RBRACE
+%token LBRACE RBRACE LPAREN RPAREN
 %token SEMICOLON
+%token KEY_INT
 
 %type <Ast.program> main
 %start main
 %%
 
 main:
-    | compound_statement EOF { Prog $1 }
+    | function_declaration EOF { Prog $1 }
+
+function_declaration:
+    | type_specifier declarator params_list compound_statement { FunctionDeclaration ($1, $2, $4) }
+
+type_specifier:
+    | KEY_INT { TypeInt }
+
+declarator:
+    | IDENTIFIER { $1 }
+
+params_list:
+    | LPAREN RPAREN {}
 
 compound_statement:
     | LBRACE statement_list RBRACE { $2 }
