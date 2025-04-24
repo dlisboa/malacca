@@ -35,6 +35,8 @@ rule next_token = parse
   | "-" { MINUS }
   | "*" { STAR }
   | "/" { SLASH }
+  | "{" { LBRACE }
+  | "}" { RBRACE }
 
 and lex_char = parse
   | _ as c "'" { CHAR c }

@@ -10,6 +10,7 @@
 
 %token EOF
 %token PLUS MINUS STAR SLASH
+%token LBRACE RBRACE
 %token SEMICOLON
 
 %type <Ast.program> main
@@ -17,7 +18,10 @@
 %%
 
 main:
-    | statement_list EOF { Prog $1 }
+    | compound_statement EOF { Prog $1 }
+
+compound_statement:
+    | LBRACE statement_list RBRACE { $2 }
 
 statement_list:
     | (* empty *) { [] }
