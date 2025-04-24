@@ -8,9 +8,7 @@ type expression =
   | Const of constant
 [@@deriving show]
 
-type statement = Expression of expression | Constant of constant
-[@@deriving show]
-
+type statement = Expression of expression [@@deriving show]
 type type_spec = TypeInt [@@deriving show]
 
 type declaration = FunctionDeclaration of type_spec * string * statement list
