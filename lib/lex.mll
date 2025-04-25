@@ -31,7 +31,7 @@ rule next_token = parse
   | newline { skip_line lexbuf; next_token lexbuf }
   | eof { EOF }
 
-  | alpha alnum+ as text { lex_identifier text }
+  | alpha alnum* as text { lex_identifier text }
 
   (* numbers *)
   (* int 1 , float 1., float 1.0, float .01 *)
@@ -55,6 +55,8 @@ rule next_token = parse
   | "}" { RBRACE }
   | "(" { LPAREN }
   | ")" { RPAREN }
+  | "=" { EQ }
+  | _ as c { raise (SyntaxError ("illegal string character: " ^ Char.escaped c)) }
 
 and lex_char = parse
   | _ as c "'" { CHAR c }

@@ -13,7 +13,7 @@
 %token EOF
 %token PLUS MINUS STAR SLASH
 %token LBRACE RBRACE LPAREN RPAREN
-%token SEMICOLON
+%token SEMICOLON EQ
 %token KEY_INT
 
 %type <Ast.program> main
@@ -21,10 +21,22 @@
 %%
 
 main:
-    | function_declaration EOF { Prog $1 }
+    | external_declaration_list EOF { Program $1}
+
+external_declaration_list:
+    | (* empty *) { [] }
+    | external_declaration external_declaration_list { $1 :: $2 }
+
+external_declaration:
+    | function_declaration { $1 }
+    | global_declaration { $1 }
+
+global_declaration:
+    | type_specifier declarator SEMICOLON { GlobalVarDeclaration { type_spec = $1; ident = $2; init = None } }
+    | type_specifier declarator EQ expr SEMICOLON { GlobalVarDeclaration { type_spec = $1; ident = $2; init = Some $4 } }
 
 function_declaration:
-    | type_specifier declarator params_list compound_statement { FunctionDeclaration ($1, $2, $4) }
+    | type_specifier declarator params_list compound_statement { FunctionDeclaration { type_spec = $1; ident = $2; params = []; body = $4 } }
 
 type_specifier:
     | KEY_INT { TypeInt }
@@ -42,12 +54,17 @@ statement_list:
     | (* empty *) { [] }
     | statement statement_list { $1 :: $2 }
 
+var_declaration:
+    | type_specifier declarator EQ expr SEMICOLON { VarDeclaration { type_spec = $1; ident = $2; init = Some $4 } }
+
 statement:
     | expr SEMICOLON { Expression $1 }
+    | var_declaration { $1 }
 
 expr:
     | binary_expr { $1 } 
     | constant { Const $1 }
+    | IDENTIFIER { Variable $1 }
 
 binary_expr:
     | expr PLUS expr { BinaryExpr (Add, $1, $3) }
