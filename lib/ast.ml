@@ -22,10 +22,13 @@ type var_declaration = {
 type statement = Expression of expression | VarDeclaration of var_declaration
 [@@deriving show]
 
+type param = Param of { type_spec : type_spec; ident : string }
+[@@deriving show]
+
 type func_declaration = {
   type_spec : type_spec;
   ident : string;
-  params : (type_spec * string option) list;
+  params : param list;
   body : statement list;
 }
 [@@deriving show]

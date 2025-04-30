@@ -14,7 +14,7 @@
 (* punctuators *)
 %token PLUS MINUS STAR SLASH
 %token LBRACE RBRACE LPAREN RPAREN
-%token SEMICOLON EQ
+%token SEMICOLON EQ COMMA
 %token DOT QUESTION COLON BANG TILDE BIT_AND BIT_OR XOR LT LE GT GE ARROW EQ_EQ NOT_EQ 
 %token LOG_AND LOG_OR SHIFTL SHIFTR PLUS_EQ MINUS_EQ MULT_EQ DIV_EQ MOD_EQ BIT_AND_EQ
 %token BIT_OR_EQ XOR_EQ SHIFTL_EQ SHIFTR_EQ MOD
@@ -58,7 +58,7 @@ global_declaration:
     | type_specifier declarator EQ expr SEMICOLON { GlobalVarDeclaration { type_spec = $1; ident = $2; init = Some $4 } }
 
 function_declaration:
-    | type_specifier declarator params_list compound_statement { FunctionDeclaration { type_spec = $1; ident = $2; params = []; body = $4 } }
+    | type_specifier declarator LPAREN params_list RPAREN compound_statement { FunctionDeclaration { type_spec = $1; ident = $2; params = $4; body = $6 } }
 
 type_specifier:
     | KEY_INT { TypeInt }
@@ -67,7 +67,9 @@ declarator:
     | IDENTIFIER { $1 }
 
 params_list:
-    | LPAREN RPAREN {}
+    | (* empty *) { [] }
+    | type_specifier declarator { [Param { type_spec = $1; ident = $2 }] }
+    | type_specifier declarator COMMA params_list { Param { type_spec = $1; ident = $2 } :: $4 }
 
 compound_statement:
     | LBRACE statement_list RBRACE { $2 }

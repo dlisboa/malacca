@@ -102,6 +102,7 @@ rule next_token = parse
   | ")" { RPAREN }
   | "=" { EQ }
   | "." { DOT }
+  | "," { COMMA }
   | "?" { QUESTION }
   | ":" { COLON }
   | "!" { BANG }
