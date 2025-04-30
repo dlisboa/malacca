@@ -78,6 +78,7 @@ statement_list:
 
 var_declaration:
     | type_specifier declarator EQ expr SEMICOLON { VarDeclaration { type_spec = $1; ident = $2; init = Some $4 } }
+    | type_specifier declarator SEMICOLON { VarDeclaration { type_spec = $1; ident = $2; init = None } }
 
 statement:
     | expr SEMICOLON { Expression $1 }
@@ -93,6 +94,12 @@ binary_expr:
     | expr MINUS expr { BinaryExpr (Sub, $1, $3) }
     | expr STAR expr { BinaryExpr (Mult, $1, $3) }
     | expr SLASH expr { BinaryExpr (Div, $1, $3) }
+    | expr LT expr { BinaryExpr (Lt, $1, $3) }
+    | expr LE expr { BinaryExpr (Le, $1, $3) }
+    | expr GT expr { BinaryExpr (Gt, $1, $3) }
+    | expr GE expr { BinaryExpr (Ge, $1, $3) }
+    | expr EQ_EQ expr { BinaryExpr (Eq, $1, $3) }
+    | expr NOT_EQ expr { BinaryExpr (NotEq, $1, $3) }
 
 constant:
     | INT { Int $1 }
