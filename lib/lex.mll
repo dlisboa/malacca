@@ -43,7 +43,9 @@ rule next_token = parse
   | "'" { lex_char lexbuf }
   | "\"" { lex_string (Buffer.create 64) lexbuf }
 
-  | "int" { KEY_INT }
+  (* comments *)
+  | "//" { lex_line_comment lexbuf }
+  | "/*" { lex_block_comment lexbuf }
 
   (* punctuators *)
   | ";" { SEMICOLON }
@@ -71,3 +73,15 @@ and lex_string buf = parse
   | [^ '\\' '"']+ as text { Buffer.add_string buf text; lex_string buf lexbuf }
   | eof { raise (SyntaxError "unterminated string") }
   | _ as c { raise (SyntaxError ("illegal string character: " ^ Char.escaped c)) }
+
+and lex_line_comment = parse
+  | eof { EOF }
+  | newline { skip_line lexbuf; next_token lexbuf }
+  | _ { lex_line_comment lexbuf }
+
+and lex_block_comment = parse
+  | "*/" { next_token lexbuf }
+  | eof { raise (SyntaxError "unterminated block comment") }
+  | newline { skip_line lexbuf; lex_block_comment lexbuf }
+  | _ { lex_block_comment lexbuf }
+
