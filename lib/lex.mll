@@ -101,6 +101,35 @@ rule next_token = parse
   | "(" { LPAREN }
   | ")" { RPAREN }
   | "=" { EQ }
+  | "." { DOT }
+  | "?" { QUESTION }
+  | ":" { COLON }
+  | "!" { BANG }
+  | "~" { TILDE }
+  | "&" { BIT_AND }
+  | "|" { BIT_OR }
+  | "^" { XOR }
+  | "<" { LT }
+  | "<=" { LE }
+  | ">" { GT }
+  | ">=" { GE }
+  | "->" { ARROW }
+  | "==" { EQ_EQ }
+  | "!=" { NOT_EQ }
+  | "&&" { LOG_AND }
+  | "||" { LOG_OR }
+  | "<<" { SHIFTL }
+  | ">>" { SHIFTR }
+  | "+=" { PLUS_EQ }
+  | "-=" { MINUS_EQ }
+  | "*=" { MULT_EQ }
+  | "/=" { DIV_EQ }
+  | "%=" { MOD_EQ }
+  | "&=" { BIT_AND_EQ }
+  | "|=" { BIT_OR_EQ }
+  | "^=" { XOR_EQ }
+  | "<<=" { SHIFTL_EQ }
+  | ">>=" { SHIFTR_EQ }
   | _ as c { raise (SyntaxError ("illegal string character: " ^ Char.escaped c)) }
 
 and lex_char = parse
