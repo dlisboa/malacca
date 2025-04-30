@@ -11,7 +11,50 @@
 
   let keywords = 
     [
-        ("int", KEY_INT);
+      ("auto", KEY_AUTO);
+      ("break", KEY_BREAK);
+      ("case", KEY_CASE);
+      ("char", KEY_CHAR);
+      ("const", KEY_CONST);
+      ("continue", KEY_CONTINUE);
+      ("default", KEY_DEFAULT);
+      ("do", KEY_DO);
+      ("double", KEY_DOUBLE);
+      ("else", KEY_ELSE);
+      ("enum", KEY_ENUM);
+      ("extern", KEY_EXTERN);
+      ("float", KEY_FLOAT);
+      ("for", KEY_FOR);
+      ("goto", KEY_GOTO);
+      ("if", KEY_IF);
+      ("inline", KEY_INLINE);
+      ("int", KEY_INT);
+      ("long", KEY_LONG);
+      ("register", KEY_REGISTER);
+      ("restrict", KEY_RESTRICT);
+      ("return", KEY_RETURN);
+      ("short", KEY_SHORT);
+      ("signed", KEY_SIGNED);
+      ("sizeof", KEY_SIZEOF);
+      ("static", KEY_STATIC);
+      ("struct", KEY_STRUCT);
+      ("switch", KEY_SWITCH);
+      ("typedef", KEY_TYPEDEF);
+      ("union", KEY_UNION);
+      ("unsigned", KEY_UNSIGNED);
+      ("void", KEY_VOID);
+      ("volatile", KEY_VOLATILE);
+      ("while", KEY_WHILE);
+      ("_Alignas", KEY__ALIGNAS);
+      ("_Alignof", KEY__ALIGNOF);
+      ("_Atomic", KEY__ATOMIC);
+      ("_Bool", KEY__BOOL);
+      ("_Complex", KEY__COMPLEX);
+      ("_Generic", KEY__GENERIC);
+      ("_Imaginary", KEY__IMAGINARY);
+      ("_Noreturn", KEY__NORETURN);
+      ("_Static_assert", KEY__STATIC_ASSERT);
+      ("_Thread_local", KEY__THREAD_LOCAL);
     ]
 
   let lex_identifier text =
