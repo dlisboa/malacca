@@ -54,14 +54,19 @@ external_declaration:
     | global_declaration { $1 }
 
 global_declaration:
-    | type_specifier declarator SEMICOLON { GlobalVarDeclaration { type_spec = $1; ident = $2; init = None } }
-    | type_specifier declarator EQ expr SEMICOLON { GlobalVarDeclaration { type_spec = $1; ident = $2; init = Some $4 } }
+    | declaration_specifier declarator SEMICOLON { GlobalVarDeclaration { type_spec = $1; ident = $2; init = None } }
+    | declaration_specifier declarator EQ expr SEMICOLON { GlobalVarDeclaration { type_spec = $1; ident = $2; init = Some $4 } }
 
 function_declaration:
-    | type_specifier declarator LPAREN params_list RPAREN compound_statement { FunctionDeclaration { type_spec = $1; ident = $2; params = $4; body = $6 } }
+    | declaration_specifier declarator LPAREN params_list RPAREN compound_statement { FunctionDeclaration { type_spec = $1; ident = $2; params = $4; body = $6 } }
+
+declaration_specifier:
+    | type_specifier { $1 }
 
 type_specifier:
     | KEY_INT { TypeInt }
+    | KEY_CHAR { TypeChar }
+    | type_specifier STAR { Pointer $1 }
 
 declarator:
     | IDENTIFIER { $1 }

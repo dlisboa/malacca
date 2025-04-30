@@ -1,4 +1,4 @@
-type type_spec = TypeInt [@@deriving show]
+type type_spec = TypeInt | TypeChar | Pointer of type_spec [@@deriving show]
 
 type constant = Int of int | Float of float | String of string | Char of char
 [@@deriving show]
