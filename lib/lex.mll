@@ -106,6 +106,7 @@ rule next_token = parse
   | ":" { COLON }
   | "!" { BANG }
   | "~" { TILDE }
+  | "%" { MOD }
   | "&" { BIT_AND }
   | "|" { BIT_OR }
   | "^" { XOR }
@@ -130,6 +131,7 @@ rule next_token = parse
   | "^=" { XOR_EQ }
   | "<<=" { SHIFTL_EQ }
   | ">>=" { SHIFTR_EQ }
+
   | _ as c { raise (SyntaxError ("illegal string character: " ^ Char.escaped c)) }
 
 and lex_char = parse
