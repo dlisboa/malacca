@@ -83,13 +83,13 @@ statement_list:
     | (* empty *) { [] }
     | statement statement_list { $1 :: $2 }
 
-var_declaration:
-    | type_specifier declarator EQ expr SEMICOLON { VarDeclaration { type_spec = $1; ident = $2; init = Some $4 } }
-    | type_specifier declarator SEMICOLON { VarDeclaration { type_spec = $1; ident = $2; init = None } }
-
 statement:
     | expr SEMICOLON { Expression $1 }
-    | var_declaration { $1 }
+    | var_declaration SEMICOLON { $1 }
+
+var_declaration:
+    | type_specifier declarator EQ expr { VarDeclaration { type_spec = $1; ident = $2; init = Some $4 } }
+    | type_specifier declarator { VarDeclaration { type_spec = $1; ident = $2; init = None } }
 
 expr:
     | binary_expr { $1 } 
