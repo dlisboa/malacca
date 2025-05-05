@@ -1,4 +1,4 @@
 # malacca
 
+A C Compiler in OCaml.
 
-**M**et**A** **L**angu**A**ge **C** **C**ompilah. A C Compiler in OCaml.
