@@ -1,4 +1,4 @@
 (executable
  (public_name malacca)
  (name main)
- (libraries malacca))
+ (libraries malacca unix))
