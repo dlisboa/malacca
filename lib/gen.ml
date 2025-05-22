@@ -1,21 +1,31 @@
 open Ast
 
-(* ARM64 assembly generation *)
+(* ARM64 Assembly Code Generator
+ *
+ * This module generates ARM64 assembly for macOS from our AST.
+ * Key features:
+ * - Uses x0-x3 for temporary registers.
+ * - Maintains 16-byte stack alignment.
+ * - Follows ARM64 ABI calling convention.
+ * - x0 holds return values.
+ * - x29 is frame pointer.
+ * - x30 is link register.
+ *)
 
-(* Register allocation - for now just use x0-x3 *)
+(* Register allocation - Round-robin through x0-x3. *)
 let next_reg = ref 0
 let get_next_reg () =
   let reg = !next_reg in
   next_reg := (reg + 1) mod 4;
   reg
 
-(* Stack frame management *)
+(* Stack frame management - Maintains 16-byte alignment. *)
 let current_stack_size = ref 0
 let get_stack_offset () =
-  current_stack_size := !current_stack_size + 16;  (* ARM64 requires 16-byte stack alignment *)
+  current_stack_size := !current_stack_size + 16;
   !current_stack_size
 
-(* Variable tracking *)
+(* Variable tracking - Maps variables to stack offsets. *)
 let var_offsets = Hashtbl.create 10
 let add_var name =
   let offset = get_stack_offset () in
@@ -25,35 +35,37 @@ let add_var name =
 let get_var_offset name =
   Hashtbl.find var_offsets name
 
-(* Assembly generation helpers *)
+(* Assembly generation helpers - Standard function prologue/epilogue. *)
 let emit_global name = ".global _" ^ name ^ "\n"
 let emit_label name = "_" ^ name ^ ":\n"
 let emit_function_prologue size =
-  "    stp x29, x30, [sp, #-16]!\n" ^  (* Save frame pointer and link register *)
-  "    mov x29, sp\n" ^                 (* Set up frame pointer *)
+  "    stp x29, x30, [sp, #-16]!\n" ^  (* Save frame pointer and link register. *)
+  "    mov x29, sp\n" ^                 (* Set up frame pointer. *)
   if size > 0 then
-    "    sub sp, sp, #" ^ string_of_int ((size + 15) land -16) ^ "\n"  (* Allocate stack space, 16-byte aligned *)
+    "    sub sp, sp, #" ^ string_of_int ((size + 15) land -16) ^ "\n"  (* Allocate stack space, 16-byte aligned. *)
   else ""
 
 let emit_function_epilogue size =
   if size > 0 then
-    "    add sp, sp, #" ^ string_of_int ((size + 15) land -16) ^ "\n" ^  (* Deallocate stack space *)
-    "    ldp x29, x30, [sp], #16\n" ^                  (* Restore frame pointer and link register *)
+    "    add sp, sp, #" ^ string_of_int ((size + 15) land -16) ^ "\n" ^  (* Deallocate stack space. *)
+    "    ldp x29, x30, [sp], #16\n" ^                  (* Restore frame pointer and link register. *)
     "    ret\n"
   else
     "    ldp x29, x30, [sp], #16\n" ^
     "    ret\n"
 
-(* Expression generation *)
+(* Expression generation - Handles constants, variables, function calls, and binary ops.
+ * Returns a tuple of (assembly_code, result_register) where result_register
+ * contains the final value of the expression. *)
 let rec gen_expr expr =
   match expr with
   | Const (Int n) ->
       let reg = get_next_reg () in
       "    mov x" ^ string_of_int reg ^ ", #" ^ string_of_int n ^ "\n", reg
   | Const (Float _) ->
-      failwith "Float constants not implemented yet"
+      failwith "Float constants not implemented yet."
   | Const (String _) ->
-      failwith "String constants not implemented yet"
+      failwith "String constants not implemented yet."
   | Const (Char c) ->
       let reg = get_next_reg () in
       "    mov x" ^ string_of_int reg ^ ", #" ^ string_of_int (Char.code c) ^ "\n", reg
@@ -62,11 +74,11 @@ let rec gen_expr expr =
       let offset = get_var_offset name in
       "    ldr x" ^ string_of_int reg ^ ", [x29, #-" ^ string_of_int offset ^ "]\n", reg
   | FunctionCall (func_name, args) ->
-      (* Generate code for arguments *)
+      (* Generate code for arguments. *)
       let arg_code_regs = List.map gen_expr args in
       let arg_code = String.concat "" (List.map (fun (code, _) -> code) arg_code_regs) in
 
-      (* Move arguments to argument registers (x0-x7) *)
+      (* Move arguments to argument registers (x0-x7). *)
       let move_args = String.concat ""
         (List.mapi (fun i (_, reg) ->
           if i <> reg then
@@ -75,7 +87,7 @@ let rec gen_expr expr =
           arg_code_regs)
       in
 
-      (* Call the function - result will be in x0 *)
+      (* Call the function - Result will be in x0. *)
       arg_code ^ move_args ^ "    bl _" ^ func_name ^ "\n", 0
   | BinaryExpr (op, left, right) ->
       let left_code, left_reg = gen_expr left in
@@ -86,21 +98,22 @@ let rec gen_expr expr =
         | Sub -> "sub"
         | Mult -> "mul"
         | Div -> "sdiv"
-        | _ -> failwith "Unsupported operator"
+        | _ -> failwith "Unsupported operator."
       in
       left_code ^ right_code ^
       "    " ^ op_code ^ " x" ^ string_of_int result_reg ^ ", x" ^
       string_of_int left_reg ^ ", x" ^ string_of_int right_reg ^ "\n",
       result_reg
 
-(* Statement generation *)
+(* Statement generation - Handles variable declarations, expressions, and returns.
+ * For returns, ensures the return value is in x0 as per calling convention. *)
 let gen_statement stmt =
   match stmt with
   | VarDeclaration { ident; init; _ } ->
       let offset = add_var ident in
       (match init with
        | Some (FunctionCall _ as expr) ->
-           (* For function calls, the result is already in x0 *)
+           (* For function calls, the result is already in x0. *)
            let expr_code, _ = gen_expr expr in
            expr_code ^
            "    str x0, [x29, #-" ^ string_of_int offset ^ "]\n"
@@ -115,12 +128,12 @@ let gen_statement stmt =
   | ReturnStatement expr_opt ->
       (match expr_opt with
        | Some (FunctionCall _ as expr) ->
-           (* For function calls, the result is already in x0 *)
+           (* For function calls, the result is already in x0. *)
            let expr_code, _ = gen_expr expr in
            expr_code ^
            emit_function_epilogue !current_stack_size
        | Some (Variable name) ->
-           (* For variables, load directly into x0 *)
+           (* For variables, load directly into x0. *)
            let offset = get_var_offset name in
            "    ldr x0, [x29, #-" ^ string_of_int offset ^ "]\n" ^
            emit_function_epilogue !current_stack_size
@@ -128,18 +141,19 @@ let gen_statement stmt =
            let expr_code, expr_reg = gen_expr expr in
            expr_code ^
            (if expr_reg <> 0 then
-             "    mov x0, x" ^ string_of_int expr_reg ^ "\n"  (* Move result to x0 if not already there *)
+             "    mov x0, x" ^ string_of_int expr_reg ^ "\n"  (* Move result to x0 if not already there. *)
            else "") ^
            emit_function_epilogue !current_stack_size
        | None ->
            emit_function_epilogue !current_stack_size)
 
-(* Function generation *)
+(* Function generation - Handles function declarations with proper stack setup.
+ * Allocates stack space for parameters and local variables. *)
 let gen_function f =
-  current_stack_size := 0;  (* Reset stack frame for new function *)
+  current_stack_size := 0;  (* Reset stack frame for new function. *)
   Hashtbl.clear var_offsets;
 
-  (* Add parameters to variable tracking *)
+  (* Add parameters to variable tracking. *)
   let param_stores = List.mapi (fun i (Param param) ->
     let offset = add_var param.ident in
     "    str x" ^ string_of_int i ^ ", [x29, #-" ^ string_of_int offset ^ "]\n"
@@ -155,13 +169,14 @@ let gen_function f =
   String.concat "" param_stores ^
   body_code
 
-let gen_var _ = ""  (* Global variables not implemented yet *)
+let gen_var _ = ""  (* Global variables not implemented yet. *)
 
 let gen_declaration decl =
   match decl with
   | FunctionDeclaration f -> gen_function f
   | GlobalVarDeclaration var -> gen_var var
 
+(* Program generation - Processes all declarations in the program. *)
 let program prog buf =
   let rec loop p =
     match p with
