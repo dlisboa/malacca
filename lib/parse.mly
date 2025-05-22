@@ -15,7 +15,7 @@
 %token PLUS MINUS STAR SLASH
 %token LBRACE RBRACE LPAREN RPAREN
 %token SEMICOLON EQ COMMA
-%token DOT QUESTION COLON BANG TILDE BIT_AND BIT_OR XOR LT LE GT GE ARROW EQ_EQ NOT_EQ 
+%token DOT QUESTION COLON BANG TILDE BIT_AND BIT_OR XOR LT LE GT GE ARROW EQ_EQ NOT_EQ
 %token LOG_AND LOG_OR SHIFTL SHIFTR PLUS_EQ MINUS_EQ MULT_EQ DIV_EQ MOD_EQ BIT_AND_EQ
 %token BIT_OR_EQ XOR_EQ SHIFTL_EQ SHIFTR_EQ MOD
 (* keywords *)
@@ -86,15 +86,23 @@ statement_list:
 statement:
     | expr SEMICOLON { Expression $1 }
     | var_declaration SEMICOLON { $1 }
+    | KEY_RETURN expr SEMICOLON { ReturnStatement (Some $2) }
+    | KEY_RETURN SEMICOLON { ReturnStatement None }
 
 var_declaration:
     | type_specifier declarator EQ expr { VarDeclaration { type_spec = $1; ident = $2; init = Some $4 } }
     | type_specifier declarator { VarDeclaration { type_spec = $1; ident = $2; init = None } }
 
 expr:
-    | binary_expr { $1 } 
+    | binary_expr { $1 }
     | constant { Const $1 }
     | IDENTIFIER { Variable $1 }
+    | IDENTIFIER LPAREN argument_list RPAREN { FunctionCall ($1, $3) }
+
+argument_list:
+    | (* empty *) { [] }
+    | expr { [$1] }
+    | expr COMMA argument_list { $1 :: $3 }
 
 binary_expr:
     | expr PLUS expr { BinaryExpr (Add, $1, $3) }

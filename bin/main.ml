@@ -15,8 +15,6 @@ let print_position lexbuf =
 let _ =
   try
     let prog = Parse.main Lex.next_token lexbuf in
-    print_endline (Ast.show_program prog);
-    print_endline "---";
     print_endline (Gen.program prog (Buffer.create 512))
   with Parsing.Parse_error ->
     let pos = print_position lexbuf in

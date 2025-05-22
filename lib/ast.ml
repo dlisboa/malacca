@@ -10,6 +10,7 @@ type expression =
   | BinaryExpr of operator * expression * expression
   | Const of constant
   | Variable of string
+  | FunctionCall of string * expression list  (* function name and arguments *)
 [@@deriving show]
 
 type var_declaration = {
@@ -19,7 +20,10 @@ type var_declaration = {
 }
 [@@deriving show]
 
-type statement = Expression of expression | VarDeclaration of var_declaration
+type statement =
+  | Expression of expression
+  | VarDeclaration of var_declaration
+  | ReturnStatement of expression option
 [@@deriving show]
 
 type param = Param of { type_spec : type_spec; ident : string }
