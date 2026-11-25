@@ -123,10 +123,10 @@ Statements are wrapped in `Located (loc, stmt)` and declarations carry a `loc`
 field, filled in by `here ()` in `parse.mly`. `Gen` remembers the latest one it
 passed so that *its* errors can also name a file and line.
 
-## Adding a feature: a worked example
+## Adding a feature: a checklist
 
-Suppose we add the `%` operator... which already exists, so here is how it was
-done, as a checklist for anything similar:
+Taking the `%` operator as the example, here is every place a new operator
+touches. The same steps apply to any new construct:
 
 1. **Token**: `lex.mll` has `| "%" { MOD }`, and `parse.mly` declares `%token MOD`.
 2. **Precedence**: `%left STAR SLASH MOD` gives it the right level.
