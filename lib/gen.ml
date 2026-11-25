@@ -151,6 +151,9 @@ type func_sig = { ret : type_spec; params : type_spec list; variadic : bool }
 
 let functions : (string, func_sig) Hashtbl.t = Hashtbl.create 16
 
+(* Labels to jump to for "break" and "continue", innermost loop first. *)
+let loops : (string * string) list ref = ref []
+
 (* Where the current function's epilogue is, and its return type. *)
 let return_label = ref ""
 let return_type = ref TypeVoid
@@ -257,7 +260,45 @@ let rec gen_expr expr : type_spec =
       emit "cmp x0, #0";
       emit "cset x0, eq";
       TypeInt
+  | BinaryExpr (LogAnd, lhs, rhs) ->
+      (* a && b: if a is false the answer is 0 and b is never evaluated. *)
+      let false_l = new_label "false" and end_l = new_label "end" in
+      ignore (gen_expr lhs);
+      emit "cbz x0, %s" false_l;  (* "compare and branch if zero" *)
+      ignore (gen_expr rhs);
+      emit "cbz x0, %s" false_l;
+      emit "mov x0, #1";
+      emit "b %s" end_l;
+      emit_label false_l;
+      emit "mov x0, #0";
+      emit_label end_l;
+      TypeInt
+  | BinaryExpr (LogOr, lhs, rhs) ->
+      (* a || b: if a is true the answer is 1 and b is never evaluated. *)
+      let true_l = new_label "true" and end_l = new_label "end" in
+      ignore (gen_expr lhs);
+      emit "cbnz x0, %s" true_l;
+      ignore (gen_expr rhs);
+      emit "cbnz x0, %s" true_l;
+      emit "mov x0, #0";
+      emit "b %s" end_l;
+      emit_label true_l;
+      emit "mov x0, #1";
+      emit_label end_l;
+      TypeInt
   | BinaryExpr (op, lhs, rhs) -> gen_binary op lhs rhs
+  | Conditional (cond, yes, no) ->
+      let else_l = new_label "else" and end_l = new_label "end" in
+      ignore (gen_expr cond);
+      emit "cbz x0, %s" else_l;
+      let yty = gen_expr yes in
+      emit "b %s" end_l;
+      emit_label else_l;
+      let nty = gen_expr no in
+      emit_label end_l;
+      (* Integers of any width are already sign-extended in x0, so both arms
+         agree on the representation; only the C type needs deciding. *)
+      if is_integer yty && is_integer nty then arith_type yty nty else yty
   | Assign (lhs, rhs) ->
       (* Compute where to store first, keep that address on the stack while
          the right-hand side is evaluated, then store. The value of the whole
@@ -363,7 +404,69 @@ let rec gen_statement stmt =
       enter_scope ();
       List.iter gen_statement stmts;
       leave_scope ()
-  | _ -> fail "this kind of statement is not supported yet"
+  | If (cond, yes, no) -> (
+      let else_l = new_label "else" and end_l = new_label "endif" in
+      ignore (gen_expr cond);
+      emit "cbz x0, %s" else_l;  (* condition false: skip the "then" part *)
+      gen_statement yes;
+      match no with
+      | None -> emit_label else_l
+      | Some no ->
+          emit "b %s" end_l;
+          emit_label else_l;
+          gen_statement no;
+          emit_label end_l)
+  | While (cond, body) ->
+      (* top: if (!cond) goto end;  body;  goto top;  end: *)
+      let top = new_label "while" and end_l = new_label "endwhile" in
+      emit_label top;
+      ignore (gen_expr cond);
+      emit "cbz x0, %s" end_l;
+      gen_loop_body ~break_l:end_l ~continue_l:top body;
+      emit "b %s" top;
+      emit_label end_l
+  | DoWhile (body, cond) ->
+      (* top: body;  continue: if (cond) goto top;  end: *)
+      let top = new_label "do" and cont = new_label "docond" in
+      let end_l = new_label "enddo" in
+      emit_label top;
+      gen_loop_body ~break_l:end_l ~continue_l:cont body;
+      emit_label cont;
+      ignore (gen_expr cond);
+      emit "cbnz x0, %s" top;
+      emit_label end_l
+  | For { init; cond; step; body } ->
+      (* init;  top: if (!cond) goto end;  body;  continue: step;  goto top *)
+      let top = new_label "for" and cont = new_label "forstep" in
+      let end_l = new_label "endfor" in
+      enter_scope ();  (* a variable declared in init lives only in the loop *)
+      List.iter gen_statement init;
+      emit_label top;
+      Option.iter
+        (fun c ->
+          ignore (gen_expr c);
+          emit "cbz x0, %s" end_l)
+        cond;
+      gen_loop_body ~break_l:end_l ~continue_l:cont body;
+      emit_label cont;
+      Option.iter (fun e -> ignore (gen_expr e)) step;
+      emit "b %s" top;
+      emit_label end_l;
+      leave_scope ()
+  | Break -> (
+      match !loops with
+      | (break_l, _) :: _ -> emit "b %s" break_l
+      | [] -> fail "'break' outside of a loop")
+  | Continue -> (
+      match !loops with
+      | (_, continue_l) :: _ -> emit "b %s" continue_l
+      | [] -> fail "'continue' outside of a loop")
+
+(* Generate a loop's body with break/continue wired to the given labels. *)
+and gen_loop_body ~break_l ~continue_l body =
+  loops := (break_l, continue_l) :: !loops;
+  gen_statement body;
+  loops := List.tl !loops
 
 (* ------------------------------------------------------------------------ *)
 (* Functions and the whole program                                          *)
@@ -408,6 +511,7 @@ let gen_function (f : func_declaration) body =
   return_label := new_label "ret";
   return_type := f.type_spec;
   scopes := [];
+  loops := [];
   enter_scope ();  (* parameters and the outermost locals share one scope *)
   if List.length f.params > 8 then
     fail "functions with more than 8 parameters are not supported";
