@@ -36,14 +36,19 @@
 %token KEY_UNSIGNED  KEY_VOID  KEY_VOLATILE  KEY_WHILE  KEY__ALIGNAS  KEY__ALIGNOF  KEY__ATOMIC
 %token KEY__BOOL  KEY__COMPLEX  KEY__GENERIC  KEY__IMAGINARY  KEY__NORETURN  KEY__STATIC_ASSERT  KEY__THREAD_LOCAL
 
-%nonassoc UNARY_MINUS ADDRESS DEREF
-
-%left COMMA
-%right EQ PLUS_EQ MINUS_EQ MULT_EQ DIV_EQ MOD_EQ BIT_AND_EQ BIT_OR_EQ XOR_EQ SHIFT_LEFT_EQ SHIFT_RIGHT_EQ
+/* Binary operator precedence, loosest first (yacc: later line = tighter).
+   Only binary operators, assignment and ?: are resolved with this table; the
+   unary and postfix levels are spelled out as separate rules below, following
+   the layering of the C standard's grammar. */
+%right EQ PLUS_EQ MINUS_EQ MULT_EQ DIV_EQ MOD_EQ BIT_AND_EQ BIT_OR_EQ XOR_EQ SHIFTL_EQ SHIFTR_EQ
 %right QUESTION COLON
-%left LOG_OR LOG_AND BIT_OR XOR BIT_AND
+%left LOG_OR
+%left LOG_AND
+%left BIT_OR
+%left XOR
+%left BIT_AND
 %left EQ_EQ NOT_EQ
-%left LE LT GE GT
+%left LT LE GT GE
 %left SHIFTL SHIFTR
 %left PLUS MINUS
 %left STAR SLASH MOD
@@ -77,14 +82,19 @@ external_declaration:
    the stars are separate nonterminals. [stars] returns a *function* that wraps
    a type in the right number of Pointer constructors. */
 
+/* "const" may come before or after the type name ("const int", "int const");
+   it is parsed and then ignored. */
 base_type:
+    | plain_type { $1 }
+    | KEY_CONST plain_type { $2 }
+    | plain_type KEY_CONST { $1 }
+
+plain_type:
     | KEY_VOID { TypeVoid }
     | KEY_CHAR { TypeChar }
     | KEY_INT { TypeInt }
     | KEY_LONG { TypeLong }
     | KEY_LONG KEY_INT { TypeLong }
-    | KEY_CONST base_type { $2 }    /* const is parsed and then ignored */
-    | base_type KEY_CONST { $1 }
 
 stars:
     | (* empty *) { fun t -> t }
@@ -160,31 +170,87 @@ statement:
     | KEY_RETURN expr SEMICOLON { ReturnStatement (Some $2) }
     | KEY_RETURN SEMICOLON { ReturnStatement None }
 
+/* ---- Expressions ---- */
+
 expr:
-    | binary_expr { $1 }
-    | constant { Const $1 }
-    | IDENTIFIER { Variable $1 }
-    | IDENTIFIER LPAREN argument_list RPAREN { FunctionCall ($1, $3) }
-
-argument_list:
-    | (* empty *) { [] }
-    | expr { [$1] }
-    | expr COMMA argument_list { $1 :: $3 }
-
-binary_expr:
+    | cast_expr { $1 }
     | expr PLUS expr { BinaryExpr (Add, $1, $3) }
     | expr MINUS expr { BinaryExpr (Sub, $1, $3) }
     | expr STAR expr { BinaryExpr (Mult, $1, $3) }
     | expr SLASH expr { BinaryExpr (Div, $1, $3) }
+    | expr MOD expr { BinaryExpr (Mod, $1, $3) }
     | expr LT expr { BinaryExpr (Lt, $1, $3) }
     | expr LE expr { BinaryExpr (Le, $1, $3) }
     | expr GT expr { BinaryExpr (Gt, $1, $3) }
     | expr GE expr { BinaryExpr (Ge, $1, $3) }
     | expr EQ_EQ expr { BinaryExpr (Eq, $1, $3) }
     | expr NOT_EQ expr { BinaryExpr (NotEq, $1, $3) }
+    | expr BIT_AND expr { BinaryExpr (BitAnd, $1, $3) }
+    | expr BIT_OR expr { BinaryExpr (BitOr, $1, $3) }
+    | expr XOR expr { BinaryExpr (BitXor, $1, $3) }
+    | expr SHIFTL expr { BinaryExpr (ShiftL, $1, $3) }
+    | expr SHIFTR expr { BinaryExpr (ShiftR, $1, $3) }
+    | expr LOG_AND expr { BinaryExpr (LogAnd, $1, $3) }
+    | expr LOG_OR expr { BinaryExpr (LogOr, $1, $3) }
+    | expr QUESTION expr COLON expr { Conditional ($1, $3, $5) }
+    /* The left side of an assignment must be a unary_expr (a variable, *p,
+       a[i]...), which is why it isn't a plain expr. */
+    | unary_expr EQ expr { Assign ($1, $3) }
+    | unary_expr PLUS_EQ expr { CompoundAssign (Add, $1, $3) }
+    | unary_expr MINUS_EQ expr { CompoundAssign (Sub, $1, $3) }
+    | unary_expr MULT_EQ expr { CompoundAssign (Mult, $1, $3) }
+    | unary_expr DIV_EQ expr { CompoundAssign (Div, $1, $3) }
+    | unary_expr MOD_EQ expr { CompoundAssign (Mod, $1, $3) }
+    | unary_expr BIT_AND_EQ expr { CompoundAssign (BitAnd, $1, $3) }
+    | unary_expr BIT_OR_EQ expr { CompoundAssign (BitOr, $1, $3) }
+    | unary_expr XOR_EQ expr { CompoundAssign (BitXor, $1, $3) }
+    | unary_expr SHIFTL_EQ expr { CompoundAssign (ShiftL, $1, $3) }
+    | unary_expr SHIFTR_EQ expr { CompoundAssign (ShiftR, $1, $3) }
 
-constant:
-    | INT { Int $1 }
-    | CHAR { Char $1 }
-    | STRING { String $1 }
-    | FLOAT { Float $1 }
+/* "(type) expr". Casts sit between unary and binary operators in C: the
+   operand of -, !, *, & is a cast_expr, which is why "-(char)x" works. */
+cast_expr:
+    | unary_expr { $1 }
+    | LPAREN type_name RPAREN cast_expr { Cast ($2, $4) }
+
+unary_expr:
+    | postfix_expr { $1 }
+    | MINUS cast_expr { UnaryExpr (Negate, $2) }
+    | PLUS cast_expr { $2 }
+    | BANG cast_expr { UnaryExpr (LogNot, $2) }
+    | TILDE cast_expr { UnaryExpr (BitNot, $2) }
+    | STAR cast_expr { UnaryExpr (Deref, $2) }
+    | BIT_AND cast_expr { UnaryExpr (AddrOf, $2) }
+    | INC unary_expr { IncDec { op = Add; prefix = true; target = $2 } }
+    | DEC unary_expr { IncDec { op = Sub; prefix = true; target = $2 } }
+    | KEY_SIZEOF unary_expr { SizeofExpr $2 }
+    | KEY_SIZEOF LPAREN type_name RPAREN { SizeofType $3 }
+
+postfix_expr:
+    | primary_expr { $1 }
+    | IDENTIFIER LPAREN argument_list RPAREN { FunctionCall ($1, $3) }
+    | postfix_expr LBRACKET expr RBRACKET
+        { UnaryExpr (Deref, BinaryExpr (Add, $1, $3)) }  /* a[i] == *(a + i) */
+    | postfix_expr INC { IncDec { op = Add; prefix = false; target = $1 } }
+    | postfix_expr DEC { IncDec { op = Sub; prefix = false; target = $1 } }
+
+primary_expr:
+    | INT { Const (Int $1) }
+    | CHAR { Const (Char $1) }
+    | FLOAT { Const (Float $1) }
+    | string_literal { Const (String $1) }
+    | IDENTIFIER { Variable $1 }
+    | LPAREN expr RPAREN { $2 }
+
+/* "Hello, " "world" is one string: adjacent literals are concatenated. */
+string_literal:
+    | STRING { $1 }
+    | STRING string_literal { $1 ^ $2 }
+
+argument_list:
+    | (* empty *) { [] }
+    | argument_list_nonempty { $1 }
+
+argument_list_nonempty:
+    | expr { [$1] }
+    | expr COMMA argument_list_nonempty { $1 :: $3 }

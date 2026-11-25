@@ -104,6 +104,7 @@ let rec gen_expr expr =
       "    " ^ op_code ^ " x" ^ string_of_int result_reg ^ ", x" ^
       string_of_int left_reg ^ ", x" ^ string_of_int right_reg ^ "\n",
       result_reg
+  | _ -> failwith "expression not supported yet"  (* temporary: gen is being rewritten *)
 
 (* Statement generation - Handles variable declarations, expressions, and returns.
  * For returns, ensures the return value is in x0 as per calling convention. *)
