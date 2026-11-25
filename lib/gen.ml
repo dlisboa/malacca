@@ -114,6 +114,45 @@ let adjust_sp op n =
     emit "%s sp, sp, x16" op
   end
 
+(* String literals live in their own section, one labelled entry each. *)
+let strings = Buffer.create 256
+
+(* Write [s] as the operand of an .asciz directive. Anything unusual becomes a
+   3-digit octal escape, which the assembler understands. *)
+let asm_escape s =
+  let b = Buffer.create (String.length s + 8) in
+  String.iter
+    (fun c ->
+      match c with
+      | '"' -> Buffer.add_string b "\\\""
+      | '\\' -> Buffer.add_string b "\\\\"
+      | ' ' .. '~' -> Buffer.add_char b c
+      | _ -> Buffer.add_string b (Printf.sprintf "\\%03o" (Char.code c)))
+    s;
+  Buffer.contents b
+
+let string_labels : (string, string) Hashtbl.t = Hashtbl.create 16
+
+(* Add [s] to the string section and return its label; the same text is only
+   stored once. "l_" (lowercase L) is the prefix macOS's linker treats as
+   private to this object file. *)
+let add_string s =
+  match Hashtbl.find_opt string_labels s with
+  | Some label -> label
+  | None ->
+      let label = Printf.sprintf "l_.str.%d" (Hashtbl.length string_labels) in
+      Hashtbl.add string_labels s label;
+      Buffer.add_string strings
+        (Printf.sprintf "%s:\n\t.asciz \"%s\"\n" label (asm_escape s));
+      label
+
+(* Put the address of a global symbol or label into x0. The address of
+   anything in memory is computed in two steps: "adrp" gets the 4KB page it is
+   on, then "add" supplies the offset inside that page. *)
+let emit_symbol_addr symbol =
+  emit "adrp x0, %s@PAGE" symbol;
+  emit "add x0, x0, %s@PAGEOFF" symbol
+
 (* ------------------------------------------------------------------------ *)
 (* Symbols: variables and functions                                         *)
 (* ------------------------------------------------------------------------ *)
@@ -241,6 +280,9 @@ let rec gen_expr expr : type_spec =
       emit_mov_imm "x0" (Char.code c);
       TypeInt  (* in C, a character constant has type int *)
   | Const (Float _) -> fail "floating point is not supported"
+  | Const (String str) ->
+      emit_symbol_addr (add_string str);
+      Pointer TypeChar
   | Variable _ ->
       let ty = gen_addr expr in
       emit_load ty;
@@ -361,21 +403,42 @@ and gen_call name args =
     | None -> fail "call to undeclared function '%s'" name
   in
   let nargs = List.length args and nfixed = List.length sg.params in
-  if nargs <> nfixed then
-    fail "function '%s' takes %d argument(s) but %d given" name nfixed nargs;
-  if nargs > 8 then fail "calls with more than 8 arguments are not supported";
-  List.iter2
-    (fun arg pty ->
+  if nargs < nfixed || (nargs > nfixed && not sg.variadic) then
+    fail "function '%s' takes %s%d argument(s) but %d given" name
+      (if sg.variadic then "at least " else "") nfixed nargs;
+  if nfixed > 8 then fail "calls with more than 8 named parameters are not supported";
+  List.iteri
+    (fun i arg ->
       let aty = gen_expr arg in
-      emit_convert ~src:aty ~dst:pty;
+      (* Fixed parameters have a declared type to convert to; the extra
+         arguments of a variadic call are passed as they are. *)
+      if i < nfixed then emit_convert ~src:aty ~dst:(List.nth sg.params i);
       push ())
-    args sg.params;
-  (* The i-th argument sits (nargs - 1 - i) slots above the stack pointer. *)
-  for i = 0 to nargs - 1 do
-    emit "ldr x%d, [sp, #%d]" i (16 * (nargs - 1 - i))
+    args;
+  (* Slot i (the i-th argument) is (nargs - 1 - i) slots above the pointer
+     once we've pushed them all; [area] bytes lower if we add a variadic area. *)
+  let nvar = nargs - nfixed in
+  let area = align_up (8 * nvar) 16 in
+  let slot i = area + (16 * (nargs - 1 - i)) in
+  if nvar > 0 then begin
+    (* Apple's arm64 ABI passes ALL variadic arguments on the stack, each in an
+       8-byte slot, lowest address first, with the named ones still in
+       registers. (This differs from the standard ARM64 ABI, where "..."
+       arguments go in registers like the rest. Passing printf's arguments in
+       x1.. would print garbage on macOS.) So build that area at the bottom of
+       the stack, right where the callee will look for it. *)
+    if area > 4080 then fail "too many arguments in a variadic call";
+    adjust_sp "sub" area;
+    for j = 0 to nvar - 1 do
+      emit "ldr x9, [sp, #%d]" (slot (nfixed + j));
+      emit "str x9, [sp, #%d]" (8 * j)
+    done
+  end;
+  for i = 0 to nfixed - 1 do
+    emit "ldr x%d, [sp, #%d]" i (slot i)
   done;
   emit "bl _%s" name;
-  if nargs > 0 then adjust_sp "add" (16 * nargs);
+  if nargs > 0 then adjust_sp "add" (area + (16 * nargs));
   sg.ret
 
 (* ------------------------------------------------------------------------ *)
@@ -556,6 +619,8 @@ let gen_function (f : func_declaration) body =
 let program (Program decls) =
   Hashtbl.reset functions;
   label_counter := 0;
+  Buffer.clear strings;
+  Hashtbl.reset string_labels;
   let text = Buffer.create 4096 in
   out := text;
   List.iter
@@ -566,3 +631,6 @@ let program (Program decls) =
       | GlobalVarDeclaration _ -> fail "global variables are not supported yet")
     decls;
   ".text\n" ^ Buffer.contents text
+  ^ (if Buffer.length strings > 0 then
+       "\n.section __TEXT,__cstring,cstring_literals\n" ^ Buffer.contents strings
+     else "")
