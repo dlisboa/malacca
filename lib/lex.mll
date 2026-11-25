@@ -65,6 +65,10 @@
 
 let whitespace = [' ' '\t']
 let digit = ['0'-'9']
+let hex_digit = ['0'-'9' 'a'-'f' 'A'-'F']
+let oct_digit = ['0'-'7']
+(* Integer suffixes (1L, 1u, 1UL...) are accepted and ignored. *)
+let int_suffix = ['u' 'U' 'l' 'L']*
 let alpha = ['a'-'z' 'A'-'Z' '_']
 let alnum = alpha | digit
 let newline = '\n' | '\r' | "\r\n"
@@ -78,7 +82,11 @@ rule next_token = parse
 
   (* numbers *)
   (* int 1 , float 1., float 1.0, float .01 *)
-  | digit+ as d { INT (int_of_string d) }
+  (* "0x" is OCaml's own hex prefix, so int_of_string can read it directly. *)
+  | ("0" ['x' 'X'] hex_digit+) as h int_suffix { INT (int_of_string h) }
+  (* C octal literals start with 0 (017 = 15); OCaml spells that "0o17". *)
+  | "0" (oct_digit+ as o) int_suffix { INT (int_of_string ("0o" ^ o)) }
+  | (digit+ as d) int_suffix { INT (int_of_string d) }
   | digit+ '.' digit* as text { FLOAT (float_of_string text) }
   | '.' digit+ as text { FLOAT (float_of_string text) }
 
@@ -132,22 +140,51 @@ rule next_token = parse
   | "^=" { XOR_EQ }
   | "<<=" { SHIFTL_EQ }
   | ">>=" { SHIFTR_EQ }
+  | "[" { LBRACKET }
+  | "]" { RBRACKET }
+  | "++" { INC }
+  | "--" { DEC }
+  | "..." { ELLIPSIS }
 
-  | _ as c { raise (SyntaxError ("illegal string character: " ^ Char.escaped c)) }
+  | _ as c { raise (SyntaxError ("illegal character: " ^ Char.escaped c)) }
 
+(* A character constant; the opening quote has been consumed. The value is the
+   byte itself (so '\n' is the char with code 10). *)
 and lex_char = parse
-  | _ as c "'" { CHAR c }
-  | _ { raise (SyntaxError "illegal char constant")}
+  | '\\' { let c = lex_escape lexbuf in close_char lexbuf; CHAR c }
+  | [^ '\\' '\'' '\n'] as c { close_char lexbuf; CHAR c }
+  | _ { raise (SyntaxError "invalid character constant") }
 
+and close_char = parse
+  | "'" { () }
+  | _ { raise (SyntaxError "character constant is too long or unterminated") }
+
+(* The text after a backslash, inside a char or string literal. Returns the
+   byte it stands for: newline, tab, backslash, a hex escape such as x41, an
+   octal escape such as 101, and so on. *)
+and lex_escape = parse
+  | 'n' { '\n' }
+  | 't' { '\t' }
+  | 'r' { '\r' }
+  | 'a' { '\007' }
+  | 'b' { '\b' }
+  | 'f' { '\012' }
+  | 'v' { '\011' }
+  | '\\' { '\\' }
+  | '\'' { '\'' }
+  | '"' { '"' }
+  | '?' { '?' }
+  | (oct_digit oct_digit? oct_digit?) as o { Char.chr (int_of_string ("0o" ^ o) land 255) }
+  | 'x' (hex_digit+ as h) { Char.chr (int_of_string ("0x" ^ h) land 255) }
+  | _ as c { raise (SyntaxError (Printf.sprintf "unknown escape sequence '\\%c'" c)) }
+
+(* A string literal; the opening quote has been consumed. Escapes are decoded as
+   we go, so the token carries the real bytes of the string. *)
 and lex_string buf = parse
   | "\"" { STRING (Buffer.contents buf) }
-  | '\\' 'n' as text { Buffer.add_string buf text; lex_string buf lexbuf }
-  | '\\' 'r' as text { Buffer.add_string buf text; lex_string buf lexbuf }
-  | '\\' 't' as text { Buffer.add_string buf text; lex_string buf lexbuf }
-  | '\\' '\\' as text { Buffer.add_string buf text; lex_string buf lexbuf }
-  | [^ '\\' '"']+ as text { Buffer.add_string buf text; lex_string buf lexbuf }
-  | eof { raise (SyntaxError "unterminated string") }
-  | _ as c { raise (SyntaxError ("illegal string character: " ^ Char.escaped c)) }
+  | '\\' { Buffer.add_char buf (lex_escape lexbuf); lex_string buf lexbuf }
+  | [^ '\\' '"' '\n']+ as text { Buffer.add_string buf text; lex_string buf lexbuf }
+  | newline | eof { raise (SyntaxError "unterminated string literal") }
 
 and lex_line_comment = parse
   | eof { EOF }
