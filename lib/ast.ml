@@ -62,6 +62,21 @@ type statement =
   | Expression of expression
   | VarDeclaration of var_declaration
   | ReturnStatement of expression option
+  | If of expression * statement * statement option
+  | While of expression * statement
+  | DoWhile of statement * expression
+  (* [init] is a list because [for (int i = 0, j = 1; ...)] declares two
+     variables. It's empty if the for has no initializer. *)
+  | For of {
+      init : statement list;
+      cond : expression option;
+      step : expression option;
+      body : statement;
+    }
+  | Block of statement list  (* { ... }: opens a new variable scope *)
+  | Break
+  | Continue
+  | Empty  (* a lone ; *)
 [@@deriving show]
 
 (* A parameter's name is "" when it is omitted, which C allows in prototypes:

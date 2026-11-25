@@ -147,6 +147,7 @@ let gen_statement stmt =
            emit_function_epilogue !current_stack_size
        | None ->
            emit_function_epilogue !current_stack_size)
+  | _ -> failwith "statement not supported yet"  (* temporary: gen is being rewritten *)
 
 (* Function generation - Handles function declarations with proper stack setup.
  * Allocates stack space for parameters and local variables. *)

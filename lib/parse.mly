@@ -36,6 +36,12 @@
 %token KEY_UNSIGNED  KEY_VOID  KEY_VOLATILE  KEY_WHILE  KEY__ALIGNAS  KEY__ALIGNOF  KEY__ATOMIC
 %token KEY__BOOL  KEY__COMPLEX  KEY__GENERIC  KEY__IMAGINARY  KEY__NORETURN  KEY__STATIC_ASSERT  KEY__THREAD_LOCAL
 
+/* The "dangling else": in [if (a) if (b) x; else y;] the else belongs to the
+   nearest if. Giving the else-less rule a lower precedence than KEY_ELSE makes
+   the parser prefer shifting the else over reducing the shorter if. */
+%nonassoc LOWER_THAN_ELSE
+%nonassoc KEY_ELSE
+
 /* Binary operator precedence, loosest first (yacc: later line = tighter).
    Only binary operators, assignment and ?: are resolved with this table; the
    unary and postfix levels are spelled out as separate rules below, following
@@ -159,6 +165,7 @@ param_array:
 compound_statement:
     | LBRACE statement_list RBRACE { $2 }
 
+/* The items of a { ... } block: statements and declarations, in any order. */
 statement_list:
     | (* empty *) { [] }
     | statement statement_list { $1 :: $2 }
@@ -167,8 +174,29 @@ statement_list:
 
 statement:
     | expr SEMICOLON { Expression $1 }
+    | SEMICOLON { Empty }
+    | compound_statement { Block $1 }
     | KEY_RETURN expr SEMICOLON { ReturnStatement (Some $2) }
     | KEY_RETURN SEMICOLON { ReturnStatement None }
+    | KEY_IF LPAREN expr RPAREN statement %prec LOWER_THAN_ELSE { If ($3, $5, None) }
+    | KEY_IF LPAREN expr RPAREN statement KEY_ELSE statement { If ($3, $5, Some $7) }
+    | KEY_WHILE LPAREN expr RPAREN statement { While ($3, $5) }
+    | KEY_DO statement KEY_WHILE LPAREN expr RPAREN SEMICOLON { DoWhile ($2, $5) }
+    | KEY_FOR LPAREN for_init optional_expr SEMICOLON optional_expr RPAREN statement
+        { For { init = $3; cond = $4; step = $6; body = $8 } }
+    | KEY_BREAK SEMICOLON { Break }
+    | KEY_CONTINUE SEMICOLON { Continue }
+
+/* The first part of a for(;;). It includes its own semicolon, because a
+   declaration and an expression statement each already end with one. */
+for_init:
+    | SEMICOLON { [] }
+    | expr SEMICOLON { [Expression $1] }
+    | declaration SEMICOLON { List.map (fun d -> VarDeclaration d) $1 }
+
+optional_expr:
+    | (* empty *) { None }
+    | expr { Some $1 }
 
 /* ---- Expressions ---- */
 
