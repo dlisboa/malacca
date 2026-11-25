@@ -3,6 +3,12 @@
 
   (* Build [int a[2][3]]'s type from its base type and dimensions [2; 3]:
      Array (Array (int, 3), 2). *)
+  (* Position of the start of the grammar rule being reduced; only valid when
+     called directly from a rule's action. *)
+  let here () =
+    let p = Parsing.symbol_start_pos () in
+    { file = p.Lexing.pos_fname; line = p.Lexing.pos_lnum }
+
   let array_of dims base =
     List.fold_right (fun n t -> Array (t, n)) dims base
 
@@ -76,10 +82,10 @@ external_declaration_list:
 external_declaration:
     | base_type stars IDENTIFIER LPAREN params RPAREN compound_statement
         { let params, variadic = $5 in
-          [FunctionDeclaration { type_spec = $2 $1; ident = $3; params; variadic; body = Some $7 }] }
+          [FunctionDeclaration { type_spec = $2 $1; ident = $3; params; variadic; body = Some $7; loc = here () }] }
     | base_type stars IDENTIFIER LPAREN params RPAREN SEMICOLON
         { let params, variadic = $5 in
-          [FunctionDeclaration { type_spec = $2 $1; ident = $3; params; variadic; body = None }] }
+          [FunctionDeclaration { type_spec = $2 $1; ident = $3; params; variadic; body = None; loc = here () }] }
     | declaration SEMICOLON { List.map (fun d -> GlobalVarDeclaration d) $1 }
 
 /* ---- Types ----
@@ -125,9 +131,11 @@ init_declarator_list:
 
 init_declarator:
     | stars IDENTIFIER array_suffix
-        { fun base -> { type_spec = array_of $3 ($1 base); ident = $2; init = None } }
+        { let loc = here () in
+          fun base -> { type_spec = array_of $3 ($1 base); ident = $2; init = None; loc } }
     | stars IDENTIFIER array_suffix EQ expr
-        { fun base -> { type_spec = array_of $3 ($1 base); ident = $2; init = Some $5 } }
+        { let loc = here () in
+          fun base -> { type_spec = array_of $3 ($1 base); ident = $2; init = Some $5; loc } }
 
 /* "[2][3]" -> [2; 3] */
 array_suffix:
@@ -172,7 +180,11 @@ statement_list:
     | declaration SEMICOLON statement_list
         { List.map (fun d -> VarDeclaration d) $1 @ $3 }
 
+/* Every statement is tagged with where it starts, for error messages. */
 statement:
+    | plain_statement { Located (here (), $1) }
+
+plain_statement:
     | expr SEMICOLON { Expression $1 }
     | SEMICOLON { Empty }
     | compound_statement { Block $1 }

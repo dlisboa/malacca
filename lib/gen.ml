@@ -28,6 +28,10 @@ exception Error of string
 
 let current_function = ref ""
 
+(* The source position being compiled: every statement and declaration updates
+   it, so any error can say where it happened. *)
+let current_loc = ref { file = "<unknown>"; line = 0 }
+
 (* [fail "format %s" arg] raises [Error] with a printf-style message.
    [Printf.ksprintf k fmt] formats like printf and then hands the resulting
    string to the continuation [k] instead of printing it. *)
@@ -37,7 +41,10 @@ let fail fmt =
       let where =
         if !current_function = "" then "" else "in function '" ^ !current_function ^ "': "
       in
-      raise (Error (where ^ msg)))
+      raise
+        (Error
+           (Printf.sprintf "%s:%d: error: %s%s" !current_loc.file !current_loc.line
+              where msg)))
     fmt
 
 (* ------------------------------------------------------------------------ *)
@@ -548,8 +555,12 @@ and gen_call name args =
 let rec gen_statement stmt =
   match stmt with
   | Empty -> ()
+  | Located (loc, stmt) ->
+      current_loc := loc;
+      gen_statement stmt
   | Expression e -> ignore (gen_expr e)
-  | VarDeclaration { type_spec; ident; init } -> (
+  | VarDeclaration { type_spec; ident; init; loc } -> (
+      current_loc := loc;
       let offset = declare_local ident type_spec in
       match init with
       | None -> ()
@@ -671,7 +682,8 @@ let rec const_eval = function
 
 let data = Buffer.create 256
 
-let gen_global { type_spec = ty; ident; init } =
+let gen_global { type_spec = ty; ident; init; loc } =
+  current_loc := loc;
   if Hashtbl.mem global_vars ident then fail "redefinition of global '%s'" ident;
   if ty = TypeVoid then fail "variable '%s' declared void" ident;
   Hashtbl.add global_vars ident (Global ty);
@@ -709,6 +721,7 @@ let signature_of (f : func_declaration) =
    same function twice (prototype, then definition) is fine as long as they
    agree. *)
 let register_function (f : func_declaration) =
+  current_loc := f.loc;
   let sg = signature_of f in
   (match Hashtbl.find_opt functions f.ident with
   | Some old when old <> sg ->
@@ -732,6 +745,7 @@ let register_function (f : func_declaration) =
    We don't know how big the locals area is until the body has been generated,
    so the body is generated into a separate buffer first. *)
 let gen_function (f : func_declaration) body =
+  current_loc := f.loc;
   current_function := f.ident;
   frame_size := 0;
   return_label := new_label "ret";

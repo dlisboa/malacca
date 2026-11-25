@@ -51,10 +51,15 @@ type expression =
   | FunctionCall of string * expression list  (* function name and arguments *)
 [@@deriving show]
 
+(* Where something was written, for error messages. [file] is the file after
+   #include processing, so it can be a header. *)
+type loc = { file : string; line : int } [@@deriving show]
+
 type var_declaration = {
   type_spec : type_spec;
   ident : string;
   init : expression option;
+  loc : loc;
 }
 [@@deriving show]
 
@@ -77,6 +82,7 @@ type statement =
   | Break
   | Continue
   | Empty  (* a lone ; *)
+  | Located of loc * statement  (* the parser wraps each statement with its position *)
 [@@deriving show]
 
 (* A parameter's name is "" when it is omitted, which C allows in prototypes:
@@ -93,6 +99,7 @@ type func_declaration = {
   params : param list;
   variadic : bool;
   body : statement list option;
+  loc : loc;
 }
 [@@deriving show]
 
