@@ -1,191 +1,464 @@
+(* Code generator: Ast.program -> ARM64 (Apple silicon) assembly text.
+
+   See docs/codegen.md for the big picture. The short version:
+
+   - It is a "stack machine". Evaluating any expression leaves its value in
+     register x0. To combine two values (a + b) we evaluate a, push x0 on the
+     stack, evaluate b, then pop a back into another register. It generates
+     more instructions than a real compiler, but each construct maps to a small,
+     fixed template, which makes the output easy to follow and always correct.
+
+   - Registers used: x0 = result of the last expression, x1 = right operand,
+     x2 = scratch, x9 = scratch, x29 = frame pointer, sp = stack pointer.
+
+   - Integer values are kept sign-extended to 64 bits in x0, whatever their C
+     type. The C type only matters when storing to / loading from memory and
+     after arithmetic that can overflow.
+
+   - Every function keeps its local variables at fixed negative offsets from x29
+     (the "frame pointer"), see [declare_local]. *)
+
 open Ast
 
-(* ARM64 Assembly Code Generator
- *
- * This module generates ARM64 assembly for macOS from our AST.
- * Key features:
- * - Uses x0-x3 for temporary registers.
- * - Maintains 16-byte stack alignment.
- * - Follows ARM64 ABI calling convention.
- * - x0 holds return values.
- * - x29 is frame pointer.
- * - x30 is link register.
- *)
+exception Error of string
 
-(* Register allocation - Round-robin through x0-x3. *)
-let next_reg = ref 0
-let get_next_reg () =
-  let reg = !next_reg in
-  next_reg := (reg + 1) mod 4;
-  reg
+(* ------------------------------------------------------------------------ *)
+(* Errors                                                                   *)
+(* ------------------------------------------------------------------------ *)
 
-(* Stack frame management - Maintains 16-byte alignment. *)
-let current_stack_size = ref 0
-let get_stack_offset () =
-  current_stack_size := !current_stack_size + 16;
-  !current_stack_size
+let current_function = ref ""
 
-(* Variable tracking - Maps variables to stack offsets. *)
-let var_offsets = Hashtbl.create 10
-let add_var name =
-  let offset = get_stack_offset () in
-  Hashtbl.add var_offsets name offset;
-  offset
+(* [fail "format %s" arg] raises [Error] with a printf-style message.
+   [Printf.ksprintf k fmt] formats like printf and then hands the resulting
+   string to the continuation [k] instead of printing it. *)
+let fail fmt =
+  Printf.ksprintf
+    (fun msg ->
+      let where =
+        if !current_function = "" then "" else "in function '" ^ !current_function ^ "': "
+      in
+      raise (Error (where ^ msg)))
+    fmt
 
-let get_var_offset name =
-  Hashtbl.find var_offsets name
+(* ------------------------------------------------------------------------ *)
+(* Types                                                                    *)
+(* ------------------------------------------------------------------------ *)
 
-(* Assembly generation helpers - Standard function prologue/epilogue. *)
-let emit_global name = ".global _" ^ name ^ "\n"
-let emit_label name = "_" ^ name ^ ":\n"
-let emit_function_prologue size =
-  "    stp x29, x30, [sp, #-16]!\n" ^  (* Save frame pointer and link register. *)
-  "    mov x29, sp\n" ^                 (* Set up frame pointer. *)
-  if size > 0 then
-    "    sub sp, sp, #" ^ string_of_int ((size + 15) land -16) ^ "\n"  (* Allocate stack space, 16-byte aligned. *)
-  else ""
+(* Sizes follow the arm64 macOS ABI: int is 32 bits, long and pointers 64.
+   [void] has size 1, as a GNU extension, so that void* arithmetic works. *)
+let rec sizeof = function
+  | TypeVoid | TypeChar -> 1
+  | TypeInt -> 4
+  | TypeLong | Pointer _ -> 8
+  | Array (t, n) -> n * sizeof t
 
-let emit_function_epilogue size =
-  if size > 0 then
-    "    add sp, sp, #" ^ string_of_int ((size + 15) land -16) ^ "\n" ^  (* Deallocate stack space. *)
-    "    ldp x29, x30, [sp], #16\n" ^                  (* Restore frame pointer and link register. *)
-    "    ret\n"
+let rec alignof = function Array (t, _) -> alignof t | t -> sizeof t
+
+let is_integer = function TypeChar | TypeInt | TypeLong -> true | _ -> false
+
+let align_up n alignment = (n + alignment - 1) / alignment * alignment
+
+(* ------------------------------------------------------------------------ *)
+(* Emitting assembly                                                        *)
+(* ------------------------------------------------------------------------ *)
+
+(* All instructions are appended to the buffer [out] points to. [out] is a
+   [ref] (a mutable cell, like a pointer to a Buffer) so that we can temporarily
+   redirect output; see [with_output]. *)
+let out = ref (Buffer.create 4096)
+
+(* [emit "mov x0, #%d" 5] appends "\tmov x0, #5\n". *)
+let emit fmt =
+  Printf.ksprintf (fun s -> Buffer.add_string !out ("\t" ^ s ^ "\n")) fmt
+
+let emit_label name = Buffer.add_string !out (name ^ ":\n")
+
+(* Run [f] with output going to [buf] instead, then restore. *)
+let with_output buf f =
+  let saved = !out in
+  out := buf;
+  Fun.protect ~finally:(fun () -> out := saved) f
+
+(* Assembler-local labels start with "L" on macOS and never reach the symbol
+   table. A global counter makes them unique. *)
+let label_counter = ref 0
+
+let new_label kind =
+  incr label_counter;
+  Printf.sprintf "L%s%d" kind !label_counter
+
+(* Load a constant into [reg]. A single "mov" can only encode 16 bits, so larger
+   values are assembled 16 bits at a time: "movz" sets the first chunk (zeroing
+   the rest) and each "movk" patches in one more chunk. *)
+let emit_mov_imm reg n =
+  if n >= -65536 && n < 65536 then emit "mov %s, #%d" reg n
   else
-    "    ldp x29, x30, [sp], #16\n" ^
-    "    ret\n"
+    let n = Int64.of_int n in
+    emit "movz %s, #%Ld" reg (Int64.logand n 0xffffL);
+    for i = 1 to 3 do
+      let chunk = Int64.logand (Int64.shift_right_logical n (16 * i)) 0xffffL in
+      if chunk <> 0L then emit "movk %s, #%Ld, lsl #%d" reg chunk (16 * i)
+    done
 
-(* Expression generation - Handles constants, variables, function calls, and binary ops.
- * Returns a tuple of (assembly_code, result_register) where result_register
- * contains the final value of the expression. *)
-let rec gen_expr expr =
+(* The stack must stay 16-byte aligned whenever we touch memory through sp, so
+   every temporary takes a 16-byte slot even though a value only needs 8. *)
+let push () = emit "str x0, [sp, #-16]!"
+
+let pop reg = emit "ldr %s, [sp], #16" reg
+
+(* sub/add can only take a 12-bit immediate (0..4095). *)
+let adjust_sp op n =
+  if n <= 4095 then emit "%s sp, sp, #%d" op n
+  else begin
+    emit_mov_imm "x16" n;
+    emit "%s sp, sp, x16" op
+  end
+
+(* ------------------------------------------------------------------------ *)
+(* Symbols: variables and functions                                         *)
+(* ------------------------------------------------------------------------ *)
+
+type var =
+  | Local of { offset : int; ty : type_spec }
+      (* lives at x29 - offset *)
+
+(* Block scoping: a stack of tables, innermost first. Entering a { } block
+   pushes a table, leaving it pops it. *)
+let scopes : (string, var) Hashtbl.t list ref = ref []
+
+let enter_scope () = scopes := Hashtbl.create 8 :: !scopes
+let leave_scope () = scopes := List.tl !scopes
+
+let lookup_var name =
+  match List.find_map (fun tbl -> Hashtbl.find_opt tbl name) !scopes with
+  | Some v -> v
+  | None -> fail "'%s' undeclared" name
+
+(* Size of the current function's local-variable area, in bytes. *)
+let frame_size = ref 0
+
+(* Reserve stack space for a local variable and return its offset below x29.
+   Each variable gets its own slot for the whole function, even if its block
+   ends early: wasteful but simple. *)
+let declare_local name ty =
+  let scope = List.hd !scopes in
+  if Hashtbl.mem scope name then fail "redeclaration of '%s'" name;
+  frame_size := align_up (!frame_size + sizeof ty) (alignof ty);
+  Hashtbl.add scope name (Local { offset = !frame_size; ty });
+  !frame_size
+
+type func_sig = { ret : type_spec; params : type_spec list; variadic : bool }
+
+let functions : (string, func_sig) Hashtbl.t = Hashtbl.create 16
+
+(* Where the current function's epilogue is, and its return type. *)
+let return_label = ref ""
+let return_type = ref TypeVoid
+
+(* ------------------------------------------------------------------------ *)
+(* Loads, stores and conversions                                            *)
+(* ------------------------------------------------------------------------ *)
+
+(* Put the address of the local at [offset] into [reg]. *)
+let emit_local_addr reg offset =
+  if offset <= 4095 then emit "sub %s, x29, #%d" reg offset
+  else begin
+    emit_mov_imm "x16" offset;
+    emit "sub %s, x29, x16" reg
+  end
+
+(* Replace the address in x0 by the value stored there. Narrow types are
+   sign-extended on load ("ldrsb" = load register signed byte), so that x0
+   always holds a properly sign-extended 64-bit value. *)
+let emit_load ty =
+  match ty with
+  | TypeChar -> emit "ldrsb x0, [x0]"
+  | TypeInt -> emit "ldrsw x0, [x0]"
+  | TypeLong | Pointer _ -> emit "ldr x0, [x0]"
+  | TypeVoid -> fail "cannot use a void value"
+  | Array _ -> ()  (* an array's "value" is its address: nothing to load *)
+
+(* Store x0 into the memory whose address is in [addr]. *)
+let emit_store ty addr =
+  match ty with
+  | TypeChar -> emit "strb w0, [%s]" addr
+  | TypeInt -> emit "str w0, [%s]" addr
+  | TypeLong | Pointer _ -> emit "str x0, [%s]" addr
+  | TypeVoid | Array _ -> fail "cannot assign to this type"
+
+(* Make the value in x0 valid for type [dst] by chopping/sign-extending it. *)
+let emit_convert ~src ~dst =
+  match (src, dst) with
+  | _ when src = dst -> ()
+  | TypeChar, TypeInt -> ()  (* already sign-extended *)
+  | _, TypeChar -> emit "sxtb x0, w0"
+  | _, TypeInt -> emit "sxtw x0, w0"
+  | _ -> ()
+
+(* ------------------------------------------------------------------------ *)
+(* Expressions                                                              *)
+(* ------------------------------------------------------------------------ *)
+
+(* The type of an arithmetic result: C's "usual arithmetic conversions", which
+   for us means long if either side is long, otherwise int (char widens). *)
+let arith_type a b = if a = TypeLong || b = TypeLong then TypeLong else TypeInt
+
+(* Combine x0 (left) and x1 (right) according to [op], leaving the result in
+   x0. Returns the result's type. *)
+let emit_binop op lty rty =
+  if not (is_integer lty && is_integer rty) then
+    fail "arithmetic on non-integer operands is not supported yet";
+  let ty = arith_type lty rty in
+  (match op with
+  | Add -> emit "add x0, x0, x1"
+  | Sub -> emit "sub x0, x0, x1"
+  | Mult -> emit "mul x0, x0, x1"
+  | Div -> emit "sdiv x0, x0, x1"
+  | Mod ->
+      (* ARM has no remainder instruction: a % b = a - (a / b) * b *)
+      emit "sdiv x2, x0, x1";
+      emit "msub x0, x2, x1, x0"
+  | BitAnd -> emit "and x0, x0, x1"
+  | BitOr -> emit "orr x0, x0, x1"
+  | BitXor -> emit "eor x0, x0, x1"
+  | ShiftL -> emit "lsl x0, x0, x1"
+  | ShiftR -> emit "asr x0, x0, x1"  (* arithmetic: keeps the sign *)
+  | Lt | Gt | Le | Ge | Eq | NotEq | LogAnd | LogOr ->
+      fail "internal error: not an arithmetic operator");
+  (* An int result must wrap around at 32 bits like in C. *)
+  emit_convert ~src:TypeLong ~dst:ty;
+  ty
+
+let rec gen_expr expr : type_spec =
   match expr with
   | Const (Int n) ->
-      let reg = get_next_reg () in
-      "    mov x" ^ string_of_int reg ^ ", #" ^ string_of_int n ^ "\n", reg
-  | Const (Float _) ->
-      failwith "Float constants not implemented yet."
-  | Const (String _) ->
-      failwith "String constants not implemented yet."
+      emit_mov_imm "x0" n;
+      if n >= -0x80000000 && n <= 0x7fffffff then TypeInt else TypeLong
   | Const (Char c) ->
-      let reg = get_next_reg () in
-      "    mov x" ^ string_of_int reg ^ ", #" ^ string_of_int (Char.code c) ^ "\n", reg
-  | Variable name ->
-      let reg = get_next_reg () in
-      let offset = get_var_offset name in
-      "    ldr x" ^ string_of_int reg ^ ", [x29, #-" ^ string_of_int offset ^ "]\n", reg
-  | FunctionCall (func_name, args) ->
-      (* Generate code for arguments. *)
-      let arg_code_regs = List.map gen_expr args in
-      let arg_code = String.concat "" (List.map (fun (code, _) -> code) arg_code_regs) in
+      emit_mov_imm "x0" (Char.code c);
+      TypeInt  (* in C, a character constant has type int *)
+  | Const (Float _) -> fail "floating point is not supported"
+  | Variable _ ->
+      let ty = gen_addr expr in
+      emit_load ty;
+      ty
+  | UnaryExpr (Negate, e) ->
+      let ty = gen_expr e in
+      emit "neg x0, x0";
+      let ty = arith_type ty TypeInt in
+      emit_convert ~src:TypeLong ~dst:ty;
+      ty
+  | UnaryExpr (BitNot, e) ->
+      let ty = gen_expr e in
+      emit "mvn x0, x0";
+      arith_type ty TypeInt
+  | UnaryExpr (LogNot, e) ->
+      ignore (gen_expr e);
+      emit "cmp x0, #0";
+      emit "cset x0, eq";
+      TypeInt
+  | BinaryExpr (op, lhs, rhs) -> gen_binary op lhs rhs
+  | Assign (lhs, rhs) ->
+      (* Compute where to store first, keep that address on the stack while
+         the right-hand side is evaluated, then store. The value of the whole
+         expression is the value just assigned. *)
+      let lty = gen_addr lhs in
+      push ();
+      let rty = gen_expr rhs in
+      emit_convert ~src:rty ~dst:lty;
+      pop "x1";
+      emit_store lty "x1";
+      lty
+  | FunctionCall (name, args) -> gen_call name args
+  | _ -> fail "this kind of expression is not supported yet"
 
-      (* Move arguments to argument registers (x0-x7). *)
-      let move_args = String.concat ""
-        (List.mapi (fun i (_, reg) ->
-          if i <> reg then
-            "    mov x" ^ string_of_int i ^ ", x" ^ string_of_int reg ^ "\n"
-          else "")
-          arg_code_regs)
+(* Comparisons and plain arithmetic. [op] is never && or || (added later). *)
+and gen_binary op lhs rhs =
+  let lty = gen_expr lhs in
+  push ();
+  let rty = gen_expr rhs in
+  emit "mov x1, x0";
+  pop "x0";
+  (* Now x0 = left operand, x1 = right operand. *)
+  match op with
+  | Lt | Gt | Le | Ge | Eq | NotEq ->
+      if not (is_integer lty && is_integer rty) then
+        fail "comparison of non-integers is not supported yet";
+      emit "cmp x0, x1";
+      let cond =
+        match op with
+        | Lt -> "lt" | Gt -> "gt" | Le -> "le" | Ge -> "ge"
+        | Eq -> "eq" | _ -> "ne"
       in
+      (* cset: set x0 to 1 if the condition holds, else 0. *)
+      emit "cset x0, %s" cond;
+      TypeInt
+  | _ -> emit_binop op lty rty
 
-      (* Call the function - Result will be in x0. *)
-      arg_code ^ move_args ^ "    bl _" ^ func_name ^ "\n", 0
-  | BinaryExpr (op, left, right) ->
-      let left_code, left_reg = gen_expr left in
-      let right_code, right_reg = gen_expr right in
-      let result_reg = get_next_reg () in
-      let op_code = match op with
-        | Add -> "add"
-        | Sub -> "sub"
-        | Mult -> "mul"
-        | Div -> "sdiv"
-        | _ -> failwith "Unsupported operator."
-      in
-      left_code ^ right_code ^
-      "    " ^ op_code ^ " x" ^ string_of_int result_reg ^ ", x" ^
-      string_of_int left_reg ^ ", x" ^ string_of_int right_reg ^ "\n",
-      result_reg
-  | _ -> failwith "expression not supported yet"  (* temporary: gen is being rewritten *)
+(* Generate code that leaves the ADDRESS of an lvalue in x0 and returns the
+   type of the object found there (which may be an array: unlike gen_expr,
+   nothing is decayed here). *)
+and gen_addr expr : type_spec =
+  match expr with
+  | Variable name -> (
+      match lookup_var name with
+      | Local { offset; ty } ->
+          emit_local_addr "x0" offset;
+          ty)
+  | _ -> fail "expression is not assignable (not an lvalue)"
 
-(* Statement generation - Handles variable declarations, expressions, and returns.
- * For returns, ensures the return value is in x0 as per calling convention. *)
-let gen_statement stmt =
-  match stmt with
-  | VarDeclaration { ident; init; _ } ->
-      let offset = add_var ident in
-      (match init with
-       | Some (FunctionCall _ as expr) ->
-           (* For function calls, the result is already in x0. *)
-           let expr_code, _ = gen_expr expr in
-           expr_code ^
-           "    str x0, [x29, #-" ^ string_of_int offset ^ "]\n"
-       | Some expr ->
-           let expr_code, expr_reg = gen_expr expr in
-           expr_code ^
-           "    str x" ^ string_of_int expr_reg ^ ", [x29, #-" ^ string_of_int offset ^ "]\n"
-       | None -> "")
-  | Expression expr ->
-      let expr_code, _ = gen_expr expr in
-      expr_code
-  | ReturnStatement expr_opt ->
-      (match expr_opt with
-       | Some (FunctionCall _ as expr) ->
-           (* For function calls, the result is already in x0. *)
-           let expr_code, _ = gen_expr expr in
-           expr_code ^
-           emit_function_epilogue !current_stack_size
-       | Some (Variable name) ->
-           (* For variables, load directly into x0. *)
-           let offset = get_var_offset name in
-           "    ldr x0, [x29, #-" ^ string_of_int offset ^ "]\n" ^
-           emit_function_epilogue !current_stack_size
-       | Some expr ->
-           let expr_code, expr_reg = gen_expr expr in
-           expr_code ^
-           (if expr_reg <> 0 then
-             "    mov x0, x" ^ string_of_int expr_reg ^ "\n"  (* Move result to x0 if not already there. *)
-           else "") ^
-           emit_function_epilogue !current_stack_size
-       | None ->
-           emit_function_epilogue !current_stack_size)
-  | _ -> failwith "statement not supported yet"  (* temporary: gen is being rewritten *)
+(* A call follows Apple's arm64 calling convention: the first 8 arguments go in
+   x0..x7 and the result comes back in x0.
 
-(* Function generation - Handles function declarations with proper stack setup.
- * Allocates stack space for parameters and local variables. *)
-let gen_function f body =
-  current_stack_size := 0;  (* Reset stack frame for new function. *)
-  Hashtbl.clear var_offsets;
-
-  (* Add parameters to variable tracking. *)
-  let param_stores = List.mapi (fun i (Param param) ->
-    let offset = add_var param.ident in
-    "    str x" ^ string_of_int i ^ ", [x29, #-" ^ string_of_int offset ^ "]\n"
-  ) f.params in
-
-  let body_code = String.concat "" (List.map gen_statement body) in
-  let stack_size = !current_stack_size in
-
-  emit_global f.ident ^ "\n" ^
-  ".p2align 2\n" ^
-  emit_label f.ident ^
-  emit_function_prologue stack_size ^
-  String.concat "" param_stores ^
-  body_code
-
-let gen_var _ = ""  (* Global variables not implemented yet. *)
-
-let gen_declaration decl =
-  match decl with
-  | FunctionDeclaration ({ body = Some body; _ } as f) -> gen_function f body
-  | FunctionDeclaration { body = None; _ } -> ""  (* a prototype emits no code *)
-  | GlobalVarDeclaration var -> gen_var var
-
-(* Program generation - Processes all declarations in the program. *)
-let program prog buf =
-  let rec loop p =
-    match p with
-    | Program [] -> Buffer.contents buf
-    | Program (decl :: rest) ->
-        Buffer.add_string buf (gen_declaration decl);
-        loop (Program rest)
+   We evaluate every argument left to right, pushing each on the stack, and only
+   then load them into registers. (Loading as we go would not work: evaluating
+   the next argument may itself call a function and clobber x0..x7.) *)
+and gen_call name args =
+  let sg =
+    match Hashtbl.find_opt functions name with
+    | Some sg -> sg
+    | None -> fail "call to undeclared function '%s'" name
   in
-  loop prog
+  let nargs = List.length args and nfixed = List.length sg.params in
+  if nargs <> nfixed then
+    fail "function '%s' takes %d argument(s) but %d given" name nfixed nargs;
+  if nargs > 8 then fail "calls with more than 8 arguments are not supported";
+  List.iter2
+    (fun arg pty ->
+      let aty = gen_expr arg in
+      emit_convert ~src:aty ~dst:pty;
+      push ())
+    args sg.params;
+  (* The i-th argument sits (nargs - 1 - i) slots above the stack pointer. *)
+  for i = 0 to nargs - 1 do
+    emit "ldr x%d, [sp, #%d]" i (16 * (nargs - 1 - i))
+  done;
+  emit "bl _%s" name;
+  if nargs > 0 then adjust_sp "add" (16 * nargs);
+  sg.ret
+
+(* ------------------------------------------------------------------------ *)
+(* Statements                                                               *)
+(* ------------------------------------------------------------------------ *)
+
+let rec gen_statement stmt =
+  match stmt with
+  | Empty -> ()
+  | Expression e -> ignore (gen_expr e)
+  | VarDeclaration { type_spec; ident; init } -> (
+      let offset = declare_local ident type_spec in
+      match init with
+      | None -> ()
+      | Some e ->
+          let ety = gen_expr e in
+          emit_convert ~src:ety ~dst:type_spec;
+          emit_local_addr "x1" offset;
+          emit_store type_spec "x1")
+  | ReturnStatement None -> emit "b %s" !return_label
+  | ReturnStatement (Some e) ->
+      let ety = gen_expr e in
+      emit_convert ~src:ety ~dst:!return_type;
+      emit "b %s" !return_label
+  | Block stmts ->
+      enter_scope ();
+      List.iter gen_statement stmts;
+      leave_scope ()
+  | _ -> fail "this kind of statement is not supported yet"
+
+(* ------------------------------------------------------------------------ *)
+(* Functions and the whole program                                          *)
+(* ------------------------------------------------------------------------ *)
+
+let signature_of (f : func_declaration) =
+  {
+    ret = f.type_spec;
+    params = List.map (fun (Param p) -> p.type_spec) f.params;
+    variadic = f.variadic;
+  }
+
+(* Remember a function's signature so later code can call it. Declaring the
+   same function twice (prototype, then definition) is fine as long as they
+   agree. *)
+let register_function (f : func_declaration) =
+  let sg = signature_of f in
+  (match Hashtbl.find_opt functions f.ident with
+  | Some old when old <> sg ->
+      fail "conflicting declarations of function '%s'" f.ident
+  | _ -> ());
+  Hashtbl.replace functions f.ident sg
+
+(* The frame layout while a function runs (stack grows downward):
+
+       high addresses
+       | caller's frame             |
+       +------------------------------+
+       | saved x29, x30 (16 bytes)    |  <- x29 points here
+       +------------------------------+
+       | locals, at x29 - offset      |
+       | (parameters first)           |
+       +------------------------------+
+       | temporaries (push/pop)       |  <- sp moves in here
+       low addresses
+
+   We don't know how big the locals area is until the body has been generated,
+   so the body is generated into a separate buffer first. *)
+let gen_function (f : func_declaration) body =
+  current_function := f.ident;
+  frame_size := 0;
+  return_label := new_label "ret";
+  return_type := f.type_spec;
+  scopes := [];
+  enter_scope ();  (* parameters and the outermost locals share one scope *)
+  if List.length f.params > 8 then
+    fail "functions with more than 8 parameters are not supported";
+  (* Parameters arrive in x0..x7; copy each to a stack slot so that they are
+     ordinary local variables from here on. *)
+  let param_stores = Buffer.create 128 in
+  let body_code = Buffer.create 1024 in
+  with_output param_stores (fun () ->
+      List.iteri
+        (fun i (Param p) ->
+          if p.ident = "" then fail "parameter %d has no name" (i + 1);
+          let offset = declare_local p.ident p.type_spec in
+          emit_local_addr "x9" offset;
+          match p.type_spec with
+          | TypeChar -> emit "strb w%d, [x9]" i
+          | TypeInt -> emit "str w%d, [x9]" i
+          | _ -> emit "str x%d, [x9]" i)
+        f.params);
+  with_output body_code (fun () ->
+      List.iter gen_statement body;
+      (* Falling off the end of a function: return 0. That's what C99 requires
+         for main, and harmless elsewhere. *)
+      emit "mov x0, #0");
+  (* Everything is known now: write the function out, prologue first. *)
+  let locals = align_up !frame_size 16 in  (* sp must stay 16-aligned *)
+  Buffer.add_string !out
+    (Printf.sprintf "\n.globl _%s\n.p2align 2\n_%s:\n" f.ident f.ident);
+  emit "stp x29, x30, [sp, #-16]!";  (* save caller's frame ptr + return address *)
+  emit "mov x29, sp";  (* our frame pointer *)
+  if locals > 0 then adjust_sp "sub" locals;  (* room for the locals *)
+  Buffer.add_buffer !out param_stores;
+  Buffer.add_buffer !out body_code;
+  (* Every return jumps here. Restoring sp from x29 also throws away any
+     temporaries still on the stack. *)
+  emit_label !return_label;
+  emit "mov sp, x29";
+  emit "ldp x29, x30, [sp], #16";
+  emit "ret";
+  current_function := ""
+
+(* The entry point: generate assembly for a whole translation unit. *)
+let program (Program decls) =
+  Hashtbl.reset functions;
+  label_counter := 0;
+  let text = Buffer.create 4096 in
+  out := text;
+  List.iter
+    (function
+      | FunctionDeclaration f -> (
+          register_function f;
+          match f.body with Some body -> gen_function f body | None -> ())
+      | GlobalVarDeclaration _ -> fail "global variables are not supported yet")
+    decls;
+  ".text\n" ^ Buffer.contents text

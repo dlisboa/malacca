@@ -25,4 +25,5 @@ let parse ~filename source =
   | Parsing.Parse_error ->
       raise (Error (Printf.sprintf "%s: error: syntax error" (position lexbuf)))
 
-let to_assembly program = Gen.program program (Buffer.create 4096)
+let to_assembly program =
+  try Gen.program program with Gen.Error msg -> raise (Error ("error: " ^ msg))
