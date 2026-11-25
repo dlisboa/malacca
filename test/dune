@@ -1,2 +1,11 @@
+; End-to-end tests: compile every test/programs/*.c with the real compiler
+; binary, run the result and compare against the expectations written in the
+; program's own comments. See test_malacca.ml for the format.
 (test
- (name test_malacca))
+ (name test_malacca)
+ (libraries unix)
+ (deps
+  %{exe:../bin/main.exe}
+  (glob_files programs/*.c))
+ (action
+  (run %{test} %{exe:../bin/main.exe} programs)))
