@@ -46,6 +46,8 @@ type expression =
   | Cast of type_spec * expression
   | SizeofType of type_spec
   | SizeofExpr of expression
+  (* { a, b, c }: only valid as the initializer of an array. *)
+  | InitList of expression list
   | Const of constant
   | Variable of string
   | FunctionCall of string * expression list  (* function name and arguments *)

@@ -133,14 +133,25 @@ init_declarator:
     | stars IDENTIFIER array_suffix
         { let loc = here () in
           fun base -> { type_spec = array_of $3 ($1 base); ident = $2; init = None; loc } }
-    | stars IDENTIFIER array_suffix EQ expr
+    | stars IDENTIFIER array_suffix EQ init_value
         { let loc = here () in
           fun base -> { type_spec = array_of $3 ($1 base); ident = $2; init = Some $5; loc } }
 
-/* "[2][3]" -> [2; 3] */
+/* "[2][3]" -> [2; 3]. "[]" gives 0: the size comes from the initializer. */
 array_suffix:
     | (* empty *) { [] }
     | LBRACKET INT RBRACKET array_suffix { $2 :: $4 }
+    | LBRACKET RBRACKET array_suffix { 0 :: $3 }
+
+/* "= expr" or "= { a, b, c }" (a trailing comma is allowed). */
+init_value:
+    | expr { $1 }
+    | LBRACE init_items RBRACE { InitList $2 }
+    | LBRACE init_items COMMA RBRACE { InitList $2 }
+
+init_items:
+    | expr { [$1] }
+    | init_items COMMA expr { $1 @ [$3] }
 
 /* ---- Parameters ---- */
 

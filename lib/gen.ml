@@ -63,6 +63,15 @@ let rec alignof = function Array (t, _) -> alignof t | t -> sizeof t
 
 let is_integer = function TypeChar | TypeInt | TypeLong -> true | _ -> false
 
+(* "int a[] = {1, 2, 3}" and "char s[] = "hi"" leave out the array size; it is
+   whatever the initializer needs. (The parser represents [] as size 0.) *)
+let complete_array_type ~fail_with ty init =
+  match (ty, init) with
+  | Array (t, 0), Some (InitList items) -> Array (t, List.length items)
+  | Array (TypeChar, 0), Some (Const (String s)) -> Array (TypeChar, String.length s + 1)
+  | Array (_, 0), _ -> fail_with ()
+  | _ -> ty
+
 (* In expressions an array turns into a pointer to its first element ("decays"),
    which is why an array can be passed where a pointer is expected. *)
 let decay = function Array (t, _) -> Pointer t | t -> t
@@ -383,6 +392,7 @@ let rec gen_expr expr : type_spec =
       (* x++ evaluates to the old value, ++x to the new one. *)
       if not prefix then emit "mov x0, x1";
       ty
+  | InitList _ -> fail "an initializer list can only initialize an array"
   | UnaryExpr (Negate, e) ->
       let ty = gen_expr e in
       emit "neg x0, x0";
@@ -561,12 +571,40 @@ let rec gen_statement stmt =
   | Expression e -> ignore (gen_expr e)
   | VarDeclaration { type_spec; ident; init; loc } -> (
       current_loc := loc;
+      let type_spec =
+        complete_array_type type_spec init ~fail_with:(fun () ->
+            fail "array '%s' needs a size or an initializer" ident)
+      in
       let offset = declare_local ident type_spec in
-      match init with
-      | None -> ()
-      | Some _ when (match type_spec with Array _ -> true | _ -> false) ->
-          fail "initializers for array '%s' are not supported" ident
-      | Some e ->
+      match (init, type_spec) with
+      | None, _ -> ()
+      | Some (InitList items), Array (elt, n) ->
+          if List.length items > n then fail "too many initializers for '%s'" ident;
+          if (match elt with Array _ -> true | _ -> false) then
+            fail "nested initializer lists are not supported";
+          (* Store each element in turn; elements with no initializer are
+             zero, as in C. Element i lives i*size bytes above element 0. *)
+          let size = sizeof elt in
+          for i = 0 to n - 1 do
+            (match List.nth_opt items i with
+            | Some e ->
+                let ety = gen_expr e in
+                emit_convert ~src:ety ~dst:elt
+            | None -> emit "mov x0, #0");
+            emit_local_addr "x1" (offset - (i * size));
+            emit_store elt "x1"
+          done
+      | Some (Const (String str)), Array (TypeChar, n) ->
+          if String.length str > n then
+            fail "initializer string for '%s' is too long" ident;
+          for i = 0 to n - 1 do
+            let byte = if i < String.length str then Char.code str.[i] else 0 in
+            emit "mov x0, #%d" byte;
+            emit_local_addr "x1" (offset - i);
+            emit "strb w0, [x1]"
+          done
+      | Some _, Array _ -> fail "invalid initializer for array '%s'" ident
+      | Some e, _ ->
           let ety = gen_expr e in
           emit_convert ~src:ety ~dst:type_spec;
           emit_local_addr "x1" offset;
@@ -684,6 +722,10 @@ let data = Buffer.create 256
 
 let gen_global { type_spec = ty; ident; init; loc } =
   current_loc := loc;
+  let ty =
+    complete_array_type ty init ~fail_with:(fun () ->
+        fail "array '%s' needs a size or an initializer" ident)
+  in
   if Hashtbl.mem global_vars ident then fail "redefinition of global '%s'" ident;
   if ty = TypeVoid then fail "variable '%s' declared void" ident;
   Hashtbl.add global_vars ident (Global ty);
@@ -692,19 +734,34 @@ let gen_global { type_spec = ty; ident; init; loc } =
     (Printf.sprintf "\n.globl _%s\n.p2align %d\n_%s:\n" ident
        (match alignof ty with 1 -> 0 | 4 -> 2 | _ -> 3)
        ident);
+  (* One initial value of scalar type [t]. *)
+  let scalar t e =
+    match (e, t) with
+    | Const (String str), Pointer TypeChar -> line ".quad %s" (add_string str)
+    | _ -> (
+        match const_eval e with
+        | None -> fail "initializer of global '%s' is not a constant" ident
+        | Some n -> (
+            match t with
+            | TypeChar -> line ".byte %d" (n land 0xff)
+            | TypeInt -> line ".long %d" (n land 0xffffffff)
+            | _ -> line ".quad %d" n))
+  in
   match (init, ty) with
   | None, _ -> line ".space %d" (sizeof ty)  (* zero-filled *)
-  | Some (Const (String str)), Pointer TypeChar ->
-      line ".quad %s" (add_string str)
-  | Some _, Array _ -> fail "initializers for array '%s' are not supported" ident
-  | Some e, _ -> (
-      match const_eval e with
-      | None -> fail "initializer of global '%s' is not a constant" ident
-      | Some n -> (
-          match ty with
-          | TypeChar -> line ".byte %d" (n land 0xff)
-          | TypeInt -> line ".long %d" (n land 0xffffffff)
-          | _ -> line ".quad %d" n))
+  | Some (InitList items), Array (elt, n) ->
+      if List.length items > n then fail "too many initializers for '%s'" ident;
+      if (match elt with Array _ -> true | _ -> false) then
+        fail "nested initializer lists are not supported";
+      List.iter (scalar elt) items;
+      let missing = n - List.length items in
+      if missing > 0 then line ".space %d" (missing * sizeof elt)
+  | Some (Const (String str)), Array (TypeChar, n) ->
+      if String.length str > n then fail "initializer string for '%s' is too long" ident;
+      line ".ascii \"%s\"" (asm_escape str);
+      if n > String.length str then line ".space %d" (n - String.length str)
+  | Some _, Array _ -> fail "invalid initializer for array '%s'" ident
+  | Some e, _ -> scalar ty e
 
 (* ------------------------------------------------------------------------ *)
 (* Functions and the whole program                                          *)
