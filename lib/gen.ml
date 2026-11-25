@@ -56,6 +56,10 @@ let rec alignof = function Array (t, _) -> alignof t | t -> sizeof t
 
 let is_integer = function TypeChar | TypeInt | TypeLong -> true | _ -> false
 
+(* In expressions an array turns into a pointer to its first element ("decays"),
+   which is why an array can be passed where a pointer is expected. *)
+let decay = function Array (t, _) -> Pointer t | t -> t
+
 let align_up n alignment = (n + alignment - 1) / alignment * alignment
 
 (* ------------------------------------------------------------------------ *)
@@ -245,31 +249,59 @@ let emit_convert ~src ~dst =
    for us means long if either side is long, otherwise int (char widens). *)
 let arith_type a b = if a = TypeLong || b = TypeLong then TypeLong else TypeInt
 
+(* reg := reg * n, for scaling an index by an element size. Clobbers x2. *)
+let emit_scale reg n =
+  if n <> 1 then begin
+    emit_mov_imm "x2" n;
+    emit "mul %s, %s, x2" reg reg
+  end
+
 (* Combine x0 (left) and x1 (right) according to [op], leaving the result in
-   x0. Returns the result's type. *)
+   x0. Returns the result's type. Pointer arithmetic is in units of the
+   pointed-to type: with int *p, "p + 1" is 4 bytes further on. *)
 let emit_binop op lty rty =
-  if not (is_integer lty && is_integer rty) then
-    fail "arithmetic on non-integer operands is not supported yet";
-  let ty = arith_type lty rty in
-  (match op with
-  | Add -> emit "add x0, x0, x1"
-  | Sub -> emit "sub x0, x0, x1"
-  | Mult -> emit "mul x0, x0, x1"
-  | Div -> emit "sdiv x0, x0, x1"
-  | Mod ->
-      (* ARM has no remainder instruction: a % b = a - (a / b) * b *)
-      emit "sdiv x2, x0, x1";
-      emit "msub x0, x2, x1, x0"
-  | BitAnd -> emit "and x0, x0, x1"
-  | BitOr -> emit "orr x0, x0, x1"
-  | BitXor -> emit "eor x0, x0, x1"
-  | ShiftL -> emit "lsl x0, x0, x1"
-  | ShiftR -> emit "asr x0, x0, x1"  (* arithmetic: keeps the sign *)
-  | Lt | Gt | Le | Ge | Eq | NotEq | LogAnd | LogOr ->
-      fail "internal error: not an arithmetic operator");
-  (* An int result must wrap around at 32 bits like in C. *)
-  emit_convert ~src:TypeLong ~dst:ty;
-  ty
+  match (op, lty, rty) with
+  | Add, Pointer t, r when is_integer r ->
+      emit_scale "x1" (sizeof t);
+      emit "add x0, x0, x1";
+      lty
+  | Add, l, Pointer t when is_integer l ->
+      emit_scale "x0" (sizeof t);
+      emit "add x0, x0, x1";
+      rty
+  | Sub, Pointer t, r when is_integer r ->
+      emit_scale "x1" (sizeof t);
+      emit "sub x0, x0, x1";
+      lty
+  | Sub, Pointer t, Pointer _ ->
+      (* The distance between two pointers is counted in elements. *)
+      emit "sub x0, x0, x1";
+      emit_mov_imm "x2" (sizeof t);
+      emit "sdiv x0, x0, x2";
+      TypeLong
+  | _ ->
+      if not (is_integer lty && is_integer rty) then
+        fail "invalid operands to a binary operator";
+      let ty = arith_type lty rty in
+      (match op with
+      | Add -> emit "add x0, x0, x1"
+      | Sub -> emit "sub x0, x0, x1"
+      | Mult -> emit "mul x0, x0, x1"
+      | Div -> emit "sdiv x0, x0, x1"
+      | Mod ->
+          (* ARM has no remainder instruction: a % b = a - (a / b) * b *)
+          emit "sdiv x2, x0, x1";
+          emit "msub x0, x2, x1, x0"
+      | BitAnd -> emit "and x0, x0, x1"
+      | BitOr -> emit "orr x0, x0, x1"
+      | BitXor -> emit "eor x0, x0, x1"
+      | ShiftL -> emit "lsl x0, x0, x1"
+      | ShiftR -> emit "asr x0, x0, x1"  (* arithmetic: keeps the sign *)
+      | Lt | Gt | Le | Ge | Eq | NotEq | LogAnd | LogOr ->
+          fail "internal error: not an arithmetic operator");
+      (* An int result must wrap around at 32 bits like in C. *)
+      emit_convert ~src:TypeLong ~dst:ty;
+      ty
 
 let rec gen_expr expr : type_spec =
   match expr with
@@ -283,9 +315,59 @@ let rec gen_expr expr : type_spec =
   | Const (String str) ->
       emit_symbol_addr (add_string str);
       Pointer TypeChar
-  | Variable _ ->
+  | Variable _ | UnaryExpr (Deref, _) ->
       let ty = gen_addr expr in
       emit_load ty;
+      decay ty
+  | UnaryExpr (AddrOf, e) -> Pointer (gen_addr e)
+  | Cast (ty, e) ->
+      let ety = gen_expr e in
+      emit_convert ~src:ety ~dst:ty;
+      ty
+  | SizeofType ty ->
+      emit_mov_imm "x0" (sizeof ty);
+      TypeLong
+  | SizeofExpr e ->
+      (* sizeof doesn't evaluate its operand: generate its code into a buffer
+         we throw away, just to learn its type. An array must not decay here,
+         so that sizeof arr is the whole array's size. *)
+      let ty =
+        with_output (Buffer.create 64) (fun () ->
+            match e with
+            | Const (String str) -> Array (TypeChar, String.length str + 1)
+            | Variable _ | UnaryExpr (Deref, _) -> gen_addr e
+            | _ -> gen_expr e)
+      in
+      emit_mov_imm "x0" (sizeof ty);
+      TypeLong
+  | CompoundAssign (op, lhs, rhs) ->
+      (* lhs op= rhs. The address of lhs is computed once, kept on the stack
+         (peeked with a plain ldr, popped at the end), and used both to read
+         the old value and to write the new one. *)
+      let lty = gen_addr lhs in
+      push ();
+      let rty = gen_expr rhs in
+      emit "mov x1, x0";
+      emit "ldr x0, [sp]";
+      emit_load lty;
+      let res = emit_binop op (decay lty) rty in
+      emit_convert ~src:res ~dst:lty;
+      pop "x2";
+      emit_store lty "x2";
+      lty
+  | IncDec { op; prefix; target } ->
+      let ty = gen_addr target in
+      push ();
+      emit_load ty;
+      emit "mov x1, x0";  (* x1 keeps the old value *)
+      let step = match ty with Pointer t -> sizeof t | _ -> 1 in
+      emit_mov_imm "x2" step;
+      emit "%s x0, x0, x2" (if op = Add then "add" else "sub");
+      emit_convert ~src:TypeLong ~dst:ty;  (* wrap char/int like C does *)
+      pop "x2";
+      emit_store ty "x2";
+      (* x++ evaluates to the old value, ++x to the new one. *)
+      if not prefix then emit "mov x0, x1";
       ty
   | UnaryExpr (Negate, e) ->
       let ty = gen_expr e in
@@ -353,7 +435,6 @@ let rec gen_expr expr : type_spec =
       emit_store lty "x1";
       lty
   | FunctionCall (name, args) -> gen_call name args
-  | _ -> fail "this kind of expression is not supported yet"
 
 (* Comparisons and plain arithmetic. [op] is never && or || (added later). *)
 and gen_binary op lhs rhs =
@@ -365,13 +446,16 @@ and gen_binary op lhs rhs =
   (* Now x0 = left operand, x1 = right operand. *)
   match op with
   | Lt | Gt | Le | Ge | Eq | NotEq ->
-      if not (is_integer lty && is_integer rty) then
-        fail "comparison of non-integers is not supported yet";
       emit "cmp x0, x1";
+      (* Pointers compare as unsigned numbers, integers as signed ones. *)
+      let unsigned = not (is_integer lty && is_integer rty) in
       let cond =
-        match op with
-        | Lt -> "lt" | Gt -> "gt" | Le -> "le" | Ge -> "ge"
-        | Eq -> "eq" | _ -> "ne"
+        match (op, unsigned) with
+        | Lt, false -> "lt" | Gt, false -> "gt"
+        | Le, false -> "le" | Ge, false -> "ge"
+        | Lt, true -> "lo" | Gt, true -> "hi"
+        | Le, true -> "ls" | Ge, true -> "hs"
+        | Eq, _ -> "eq" | _ -> "ne"
       in
       (* cset: set x0 to 1 if the condition holds, else 0. *)
       emit "cset x0, %s" cond;
@@ -388,6 +472,12 @@ and gen_addr expr : type_spec =
       | Local { offset; ty } ->
           emit_local_addr "x0" offset;
           ty)
+  | UnaryExpr (Deref, e) -> (
+      (* *e: the address is simply the value of e. *)
+      match gen_expr e with
+      | Pointer TypeVoid -> fail "cannot dereference a void pointer"
+      | Pointer t -> t
+      | _ -> fail "cannot dereference something that is not a pointer")
   | _ -> fail "expression is not assignable (not an lvalue)"
 
 (* A call follows Apple's arm64 calling convention: the first 8 arguments go in
@@ -453,6 +543,8 @@ let rec gen_statement stmt =
       let offset = declare_local ident type_spec in
       match init with
       | None -> ()
+      | Some _ when (match type_spec with Array _ -> true | _ -> false) ->
+          fail "initializers for array '%s' are not supported" ident
       | Some e ->
           let ety = gen_expr e in
           emit_convert ~src:ety ~dst:type_spec;
