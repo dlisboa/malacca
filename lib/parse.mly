@@ -1,5 +1,15 @@
 %{
   open Ast
+
+  (* Build [int a[2][3]]'s type from its base type and dimensions [2; 3]:
+     Array (Array (int, 3), 2). *)
+  let array_of dims base =
+    List.fold_right (fun n t -> Array (t, n)) dims base
+
+  (* "f(void)" means "no parameters": a single unnamed void parameter. *)
+  let drop_void_param = function
+    | [ Param { type_spec = TypeVoid; ident = "" } ] -> []
+    | params -> params
 %}
 
 (* constants *)
@@ -43,38 +53,98 @@
 %%
 
 main:
-    | external_declaration_list EOF { Program $1}
+    | external_declaration_list EOF { Program (List.concat $1) }
 
 external_declaration_list:
     | (* empty *) { [] }
     | external_declaration external_declaration_list { $1 :: $2 }
 
+/* A top-level item is a function (definition or prototype) or a list of global
+   variables. Both start with "base_type stars IDENTIFIER", so the parser only
+   knows which one it has when it sees "(" (function) or anything else. */
 external_declaration:
-    | function_declaration { $1 }
-    | global_declaration { $1 }
+    | base_type stars IDENTIFIER LPAREN params RPAREN compound_statement
+        { let params, variadic = $5 in
+          [FunctionDeclaration { type_spec = $2 $1; ident = $3; params; variadic; body = Some $7 }] }
+    | base_type stars IDENTIFIER LPAREN params RPAREN SEMICOLON
+        { let params, variadic = $5 in
+          [FunctionDeclaration { type_spec = $2 $1; ident = $3; params; variadic; body = None }] }
+    | declaration SEMICOLON { List.map (fun d -> GlobalVarDeclaration d) $1 }
 
-global_declaration:
-    | declaration_specifier declarator SEMICOLON { GlobalVarDeclaration { type_spec = $1; ident = $2; init = None } }
-    | declaration_specifier declarator EQ expr SEMICOLON { GlobalVarDeclaration { type_spec = $1; ident = $2; init = Some $4 } }
+/* ---- Types ----
+   C declarations read "base type, then for each name its own stars/arrays":
+   in [int *a, b;] a is a pointer but b is a plain int. So the base type and
+   the stars are separate nonterminals. [stars] returns a *function* that wraps
+   a type in the right number of Pointer constructors. */
 
-function_declaration:
-    | declaration_specifier declarator LPAREN params_list RPAREN compound_statement { FunctionDeclaration { type_spec = $1; ident = $2; params = $4; body = $6 } }
-
-declaration_specifier:
-    | type_specifier { $1 }
-
-type_specifier:
-    | KEY_INT { TypeInt }
+base_type:
+    | KEY_VOID { TypeVoid }
     | KEY_CHAR { TypeChar }
-    | type_specifier STAR { Pointer $1 }
+    | KEY_INT { TypeInt }
+    | KEY_LONG { TypeLong }
+    | KEY_LONG KEY_INT { TypeLong }
+    | KEY_CONST base_type { $2 }    /* const is parsed and then ignored */
+    | base_type KEY_CONST { $1 }
 
-declarator:
+stars:
+    | (* empty *) { fun t -> t }
+    | STAR qualifiers stars { fun t -> $3 (Pointer t) }
+
+qualifiers:
+    | (* empty *) { () }
+    | KEY_CONST qualifiers { () }
+
+/* A type on its own, as in a cast or sizeof: [(char *)] */
+type_name:
+    | base_type stars { $2 $1 }
+
+/* ---- Declarations (shared by globals and locals) ---- */
+
+declaration:
+    | base_type init_declarator_list { List.map (fun make -> make $1) $2 }
+
+init_declarator_list:
+    | init_declarator { [$1] }
+    | init_declarator COMMA init_declarator_list { $1 :: $3 }
+
+init_declarator:
+    | stars IDENTIFIER array_suffix
+        { fun base -> { type_spec = array_of $3 ($1 base); ident = $2; init = None } }
+    | stars IDENTIFIER array_suffix EQ expr
+        { fun base -> { type_spec = array_of $3 ($1 base); ident = $2; init = Some $5 } }
+
+/* "[2][3]" -> [2; 3] */
+array_suffix:
+    | (* empty *) { [] }
+    | LBRACKET INT RBRACKET array_suffix { $2 :: $4 }
+
+/* ---- Parameters ---- */
+
+params:
+    | (* empty *) { ([], false) }
+    | param_list { (drop_void_param $1, false) }
+    | param_list COMMA ELLIPSIS { ($1, true) }
+
+/* Left-recursive on purpose: after "param_list ," the parser must still be
+   able to choose between another param and the "..." that ends a variadic list. */
+param_list:
+    | param { [$1] }
+    | param_list COMMA param { $1 @ [$3] }
+
+param:
+    | base_type stars param_name param_array
+        { Param { type_spec = $4 ($2 $1); ident = $3 } }
+
+param_name:
+    | (* empty *) { "" }
     | IDENTIFIER { $1 }
 
-params_list:
-    | (* empty *) { [] }
-    | type_specifier declarator { [Param { type_spec = $1; ident = $2 }] }
-    | type_specifier declarator COMMA params_list { Param { type_spec = $1; ident = $2 } :: $4 }
+/* Arrays decay to pointers when passed to functions: [char *argv[]] is
+   [char **argv], and [int a[10]] is [int *a]. */
+param_array:
+    | (* empty *) { fun t -> t }
+    | LBRACKET RBRACKET { fun t -> Pointer t }
+    | LBRACKET INT RBRACKET { fun t -> Pointer t }
 
 compound_statement:
     | LBRACE statement_list RBRACE { $2 }
@@ -82,16 +152,13 @@ compound_statement:
 statement_list:
     | (* empty *) { [] }
     | statement statement_list { $1 :: $2 }
+    | declaration SEMICOLON statement_list
+        { List.map (fun d -> VarDeclaration d) $1 @ $3 }
 
 statement:
     | expr SEMICOLON { Expression $1 }
-    | var_declaration SEMICOLON { $1 }
     | KEY_RETURN expr SEMICOLON { ReturnStatement (Some $2) }
     | KEY_RETURN SEMICOLON { ReturnStatement None }
-
-var_declaration:
-    | type_specifier declarator EQ expr { VarDeclaration { type_spec = $1; ident = $2; init = Some $4 } }
-    | type_specifier declarator { VarDeclaration { type_spec = $1; ident = $2; init = None } }
 
 expr:
     | binary_expr { $1 }

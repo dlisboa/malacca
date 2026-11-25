@@ -149,7 +149,7 @@ let gen_statement stmt =
 
 (* Function generation - Handles function declarations with proper stack setup.
  * Allocates stack space for parameters and local variables. *)
-let gen_function f =
+let gen_function f body =
   current_stack_size := 0;  (* Reset stack frame for new function. *)
   Hashtbl.clear var_offsets;
 
@@ -159,7 +159,7 @@ let gen_function f =
     "    str x" ^ string_of_int i ^ ", [x29, #-" ^ string_of_int offset ^ "]\n"
   ) f.params in
 
-  let body_code = String.concat "" (List.map gen_statement f.body) in
+  let body_code = String.concat "" (List.map gen_statement body) in
   let stack_size = !current_stack_size in
 
   emit_global f.ident ^ "\n" ^
@@ -173,7 +173,8 @@ let gen_var _ = ""  (* Global variables not implemented yet. *)
 
 let gen_declaration decl =
   match decl with
-  | FunctionDeclaration f -> gen_function f
+  | FunctionDeclaration ({ body = Some body; _ } as f) -> gen_function f body
+  | FunctionDeclaration { body = None; _ } -> ""  (* a prototype emits no code *)
   | GlobalVarDeclaration var -> gen_var var
 
 (* Program generation - Processes all declarations in the program. *)
