@@ -1,8 +1,16 @@
-foo: foo.o
-	ld -macos_version_min 15.0.0 -o foo foo.o -lSystem -syslibroot `xcrun -sdk macosx --show-sdk-path` -arch arm64 
+# Thin wrappers around dune; the real build description is in the dune files.
 
-foo.o: foo.s
-	as -o foo.o foo.s
+.PHONY: build test clean
+
+build:
+	dune build
+
+test:
+	dune test
+
+# Compile and run any C file:  make run FILE=test/programs/hello.c
+run: build
+	_build/default/bin/main.exe -o /tmp/malacca-run $(FILE) && /tmp/malacca-run
 
 clean:
-	rm foo foo.o
+	dune clean
