@@ -1,7 +1,7 @@
 (* The compiler pipeline, minus anything that touches the outside world
    (running the assembler, writing files...). That part lives in bin/main.ml.
 
-     source text --parse--> Ast.program --Gen.program--> assembly text
+     source text --preprocess--> text --parse--> Ast.program --Gen.program--> assembly
 
    Every user-facing failure is reported by raising [Error] with a message that
    is ready to print. *)
@@ -13,6 +13,11 @@ let position lexbuf =
   let pos = lexbuf.Lexing.lex_start_p in
   Printf.sprintf "%s:%d:%d" pos.Lexing.pos_fname pos.Lexing.pos_lnum
     (pos.Lexing.pos_cnum - pos.Lexing.pos_bol + 1)
+
+(* Run the C preprocessor over [source] (the text of [filename]). *)
+let preprocess ~include_dirs ~filename source =
+  try Preproc.run ~include_dirs ~filename source
+  with Preproc.Error msg -> raise (Error msg)
 
 let parse ~filename source =
   let lexbuf = Lexing.from_string source in
@@ -26,4 +31,4 @@ let parse ~filename source =
       raise (Error (Printf.sprintf "%s: error: syntax error" (position lexbuf)))
 
 let to_assembly program =
-  try Gen.program program with Gen.Error msg -> raise (Error ("error: " ^ msg))
+  try Gen.program program with Gen.Error msg -> raise (Error msg)

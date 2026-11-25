@@ -1,0 +1,3 @@
+; Build-time helper: turns include/*.h into an OCaml module (see lib/dune).
+(executable
+ (name embed_headers))

@@ -3,6 +3,8 @@
      malacca prog.c            -> ./prog
      malacca prog.c -o out     -> ./out
      malacca -S prog.c         -> prog.s    (stop after generating assembly)
+     malacca -E prog.c                      (print the preprocessed source)
+     malacca -I dir prog.c                  (also search dir for #include)
      malacca --dump-ast prog.c              (print the parsed tree and stop)
 
    The compiler proper (lib/) only produces assembly text. This file glues it
@@ -55,16 +57,20 @@ let assemble_and_link ~asm ~output =
         [ "-arch"; "arm64"; "-o"; output; obj_file; "-lSystem";
           "-syslibroot"; sdk_path (); "-e"; "_main" ])
 
-let usage = "usage: malacca [-S] [--dump-ast] [-o output] file.c"
+let usage = "usage: malacca [-E] [-S] [--dump-ast] [-I dir] [-o output] file.c"
 
 let () =
   let input = ref None
   and output = ref None
   and asm_only = ref false
-  and dump_ast = ref false in
+  and dump_ast = ref false
+  and preprocess_only = ref false
+  and include_dirs = ref [] in
   Arg.parse
     [ ("-o", Arg.String (fun s -> output := Some s), "<file> write output to <file>");
       ("-S", Arg.Set asm_only, " stop after generating assembly");
+      ("-E", Arg.Set preprocess_only, " stop after preprocessing and print the result");
+      ("-I", Arg.String (fun d -> include_dirs := !include_dirs @ [ d ]), "<dir> add an #include search directory");
       ("--dump-ast", Arg.Set dump_ast, " print the syntax tree and stop") ]
     (fun f -> input := Some f)
     usage;
@@ -74,7 +80,12 @@ let () =
       exit 2
   | Some input -> (
       try
-        let program = Compile.parse ~filename:input (read_file input) in
+        let source =
+          Compile.preprocess ~include_dirs:!include_dirs ~filename:input (read_file input)
+        in
+        if !preprocess_only then print_string source
+        else
+        let program = Compile.parse ~filename:input source in
         if !dump_ast then print_endline (Ast.show_program program)
         else
           let asm = Compile.to_assembly program in

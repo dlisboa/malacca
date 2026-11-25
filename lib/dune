@@ -7,3 +7,14 @@
 
 (ocamlyacc parse)
 (ocamllex lex)
+
+; The compiler's own copy of the standard headers (include/*.h), compiled into
+; the library as the module Builtin_headers. See tools/embed_headers.ml.
+(rule
+ (targets builtin_headers.ml)
+ (deps
+  (glob_files ../include/*.h))
+ (action
+  (with-stdout-to
+   builtin_headers.ml
+   (run ../tools/embed_headers.exe %{deps}))))

@@ -6,6 +6,7 @@
  (libraries unix)
  (deps
   %{exe:../bin/main.exe}
-  (glob_files programs/*.c))
+  (glob_files programs/*.c)
+  (glob_files programs/*.h))
  (action
   (run %{test} %{exe:../bin/main.exe} programs)))

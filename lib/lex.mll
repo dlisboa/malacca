@@ -57,6 +57,13 @@
       ("_Thread_local", KEY__THREAD_LOCAL);
     ]
 
+  (* An integer constant that doesn't fit in an OCaml int is a lexing error
+     rather than a crash. *)
+  let int_constant text =
+    match int_of_string_opt text with
+    | Some n -> INT n
+    | None -> raise (SyntaxError ("integer constant is too large: " ^ text))
+
   let lex_identifier text =
     match List.assoc_opt text keywords with
       | Some tok -> tok
@@ -75,6 +82,16 @@ let newline = '\n' | '\r' | "\r\n"
 
 rule next_token = parse
   | whitespace+ { next_token lexbuf }
+
+  (* The preprocessor leaves markers such as  # 12 "stdio.h"  meaning "the next
+     line is line 12 of stdio.h". They are the only '#' left in the text. *)
+  | "# " (digit+ as line) " \"" ([^ '"' '\n']* as file) "\"" [^ '\n']* newline {
+      let pos = lexbuf.lex_curr_p in
+      lexbuf.lex_curr_p <-
+        { pos with pos_fname = file; pos_lnum = int_of_string line;
+                   pos_bol = lexbuf.lex_curr_pos };
+      next_token lexbuf
+    }
   | newline { skip_line lexbuf; next_token lexbuf }
   | eof { EOF }
 
@@ -83,10 +100,10 @@ rule next_token = parse
   (* numbers *)
   (* int 1 , float 1., float 1.0, float .01 *)
   (* "0x" is OCaml's own hex prefix, so int_of_string can read it directly. *)
-  | ("0" ['x' 'X'] hex_digit+) as h int_suffix { INT (int_of_string h) }
+  | ("0" ['x' 'X'] hex_digit+) as h int_suffix { int_constant h }
   (* C octal literals start with 0 (017 = 15); OCaml spells that "0o17". *)
-  | "0" (oct_digit+ as o) int_suffix { INT (int_of_string ("0o" ^ o)) }
-  | (digit+ as d) int_suffix { INT (int_of_string d) }
+  | "0" (oct_digit+ as o) int_suffix { int_constant ("0o" ^ o) }
+  | (digit+ as d) int_suffix { int_constant d }
   | digit+ '.' digit* as text { FLOAT (float_of_string text) }
   | '.' digit+ as text { FLOAT (float_of_string text) }
 
