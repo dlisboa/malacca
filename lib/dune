@@ -1,5 +1,8 @@
 (library
  (name malacca)
+ ; macro_parser.ml is an unfinished experiment (it needs a `Parse.expr_rule`
+ ; entry point that doesn't exist). Keep it out of the build until it's ready.
+ (modules :standard \ macro_parser)
  (preprocess (pps ppx_deriving.show)))
 
 (ocamlyacc parse)
