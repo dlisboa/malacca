@@ -7,9 +7,9 @@
 (source
  (github username/reponame))
 
-(authors "Author Name <author@example.com>")
+(authors "Diogo Lisboa")
 
-(maintainers "Maintainer Name <maintainer@example.com>")
+(maintainers "Diogo Lisboa")
 
 (license LICENSE)
 
@@ -17,8 +17,8 @@
 
 (package
  (name malacca)
- (synopsis "A short synopsis")
- (description "A longer description")
+ (synopsis "A C compiler for ARM64 macOS")
+ (description "A C compiler written in OCaml. It preprocesses, parses and compiles a subset of C to ARM64 assembly, then assembles and links it with the system tools.")
  (depends ocaml)
  (tags
   ("add topics" "to describe" your project)))
