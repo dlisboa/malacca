@@ -164,6 +164,10 @@ let emit_symbol_addr symbol =
 type var =
   | Local of { offset : int; ty : type_spec }
       (* lives at x29 - offset *)
+  | Global of type_spec  (* lives in the data section, as symbol _name *)
+
+(* Globals are visible everywhere, below every function-level scope. *)
+let global_vars : (string, var) Hashtbl.t = Hashtbl.create 16
 
 (* Block scoping: a stack of tables, innermost first. Entering a { } block
    pushes a table, leaving it pops it. *)
@@ -175,7 +179,10 @@ let leave_scope () = scopes := List.tl !scopes
 let lookup_var name =
   match List.find_map (fun tbl -> Hashtbl.find_opt tbl name) !scopes with
   | Some v -> v
-  | None -> fail "'%s' undeclared" name
+  | None -> (
+      match Hashtbl.find_opt global_vars name with
+      | Some v -> v
+      | None -> fail "'%s' undeclared" name)
 
 (* Size of the current function's local-variable area, in bytes. *)
 let frame_size = ref 0
@@ -471,6 +478,9 @@ and gen_addr expr : type_spec =
       match lookup_var name with
       | Local { offset; ty } ->
           emit_local_addr "x0" offset;
+          ty
+      | Global ty ->
+          emit_symbol_addr ("_" ^ name);
           ty)
   | UnaryExpr (Deref, e) -> (
       (* *e: the address is simply the value of e. *)
@@ -624,6 +634,67 @@ and gen_loop_body ~break_l ~continue_l body =
   loops := List.tl !loops
 
 (* ------------------------------------------------------------------------ *)
+(* Global variables                                                         *)
+(* ------------------------------------------------------------------------ *)
+
+(* A global's initial value must be known at compile time, because it is
+   written straight into the executable's data section. This folds constant
+   expressions such as 2 * 8 + 1; None means "not a constant". *)
+let rec const_eval = function
+  | Const (Int n) -> Some n
+  | Const (Char c) -> Some (Char.code c)
+  | Cast (_, e) -> const_eval e
+  (* Option.map f x is "Some (f v)" if x is "Some v", and None otherwise. *)
+  | UnaryExpr (Negate, e) -> Option.map (fun n -> -n) (const_eval e)
+  | UnaryExpr (BitNot, e) -> Option.map lnot (const_eval e)
+  | UnaryExpr (LogNot, e) ->
+      Option.map (fun n -> if n = 0 then 1 else 0) (const_eval e)
+  | BinaryExpr (op, a, b) -> (
+      match (const_eval a, const_eval b) with
+      | Some x, Some y -> (
+          let bool b = Some (if b then 1 else 0) in
+          match op with
+          | Add -> Some (x + y) | Sub -> Some (x - y) | Mult -> Some (x * y)
+          | Div when y <> 0 -> Some (x / y)
+          | Mod when y <> 0 -> Some (x mod y)
+          | BitAnd -> Some (x land y) | BitOr -> Some (x lor y)
+          | BitXor -> Some (x lxor y)
+          | ShiftL -> Some (x lsl y) | ShiftR -> Some (x asr y)
+          | Lt -> bool (x < y) | Gt -> bool (x > y)
+          | Le -> bool (x <= y) | Ge -> bool (x >= y)
+          | Eq -> bool (x = y) | NotEq -> bool (x <> y)
+          | LogAnd -> bool (x <> 0 && y <> 0)
+          | LogOr -> bool (x <> 0 || y <> 0)
+          | Div | Mod -> None)
+      | _ -> None)
+  | _ -> None
+
+let data = Buffer.create 256
+
+let gen_global { type_spec = ty; ident; init } =
+  if Hashtbl.mem global_vars ident then fail "redefinition of global '%s'" ident;
+  if ty = TypeVoid then fail "variable '%s' declared void" ident;
+  Hashtbl.add global_vars ident (Global ty);
+  let line fmt = Printf.ksprintf (fun s -> Buffer.add_string data ("\t" ^ s ^ "\n")) fmt in
+  Buffer.add_string data
+    (Printf.sprintf "\n.globl _%s\n.p2align %d\n_%s:\n" ident
+       (match alignof ty with 1 -> 0 | 4 -> 2 | _ -> 3)
+       ident);
+  match (init, ty) with
+  | None, _ -> line ".space %d" (sizeof ty)  (* zero-filled *)
+  | Some (Const (String str)), Pointer TypeChar ->
+      line ".quad %s" (add_string str)
+  | Some _, Array _ -> fail "initializers for array '%s' are not supported" ident
+  | Some e, _ -> (
+      match const_eval e with
+      | None -> fail "initializer of global '%s' is not a constant" ident
+      | Some n -> (
+          match ty with
+          | TypeChar -> line ".byte %d" (n land 0xff)
+          | TypeInt -> line ".long %d" (n land 0xffffffff)
+          | _ -> line ".quad %d" n))
+
+(* ------------------------------------------------------------------------ *)
 (* Functions and the whole program                                          *)
 (* ------------------------------------------------------------------------ *)
 
@@ -710,6 +781,8 @@ let gen_function (f : func_declaration) body =
 (* The entry point: generate assembly for a whole translation unit. *)
 let program (Program decls) =
   Hashtbl.reset functions;
+  Hashtbl.reset global_vars;
+  Buffer.clear data;
   label_counter := 0;
   Buffer.clear strings;
   Hashtbl.reset string_labels;
@@ -720,9 +793,12 @@ let program (Program decls) =
       | FunctionDeclaration f -> (
           register_function f;
           match f.body with Some body -> gen_function f body | None -> ())
-      | GlobalVarDeclaration _ -> fail "global variables are not supported yet")
+      | GlobalVarDeclaration v -> gen_global v)
     decls;
   ".text\n" ^ Buffer.contents text
   ^ (if Buffer.length strings > 0 then
        "\n.section __TEXT,__cstring,cstring_literals\n" ^ Buffer.contents strings
+     else "")
+  ^ (if Buffer.length data > 0 then
+       "\n.section __DATA,__data\n" ^ Buffer.contents data
      else "")
